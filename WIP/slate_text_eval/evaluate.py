@@ -4,9 +4,11 @@ from pathlib import Path
 from mmif import Mmif, View
 from typing import Dict, List, Tuple
 from jiwer import wer, cer
-from collections import defaultdict
+from collections import defaultdict, Counter
 from dateutil import parser
 from datetime import datetime
+import matplotlib.pyplot as plt
+import numpy as np
 
 # Define the fields we want to extract from transcriptions
 FIELDS_OF_INTEREST = {
@@ -76,11 +78,11 @@ def parse_llava_text(text: str) -> Dict[str, str]:
     Parse LLaVA output text to extract prompt and response
     Returns a dictionary with 'prompt' and 'response' keys
     """
-    # Find content between [INST] and [/INST] tags for prompt
+    # Find content between 
     prompt_match = re.search(r'\[INST\](.*?)\[/INST\]', text, re.DOTALL)
     prompt = prompt_match.group(1).strip() if prompt_match else ""
     
-    # Get everything after [/INST] for response
+    # Get everything after 
     response_match = re.search(r'\[/INST\](.*?)$', text, re.DOTALL)
     response = response_match.group(1).strip() if response_match else ""
     
@@ -349,6 +351,82 @@ def evaluate_predictions(gold_data: Dict, pred_data: Dict) -> Dict:
     
     return results
 
+def create_dataset_visualizations(gold_data: Dict, pred_data: Dict, output_dir: str = "evaluation_plots"):
+    """
+    Create and save visualizations of the dataset and evaluation results
+    """
+    # Create output directory if it doesn't exist
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    
+    # 1. Key Distribution Pie Chart
+    key_counts = Counter()
+    for image_data in gold_data.values():
+        for key in image_data["structured_transcription"].keys():
+            key_counts[key] += 1
+    
+    plt.figure(figsize=(12, 8))
+    plt.pie(key_counts.values(), labels=key_counts.keys(), autopct='%1.1f%%')
+    plt.title('Distribution of Keys in Dataset')
+    plt.axis('equal')
+    plt.savefig(f'{output_dir}/key_distribution_pie.png')
+    plt.close()
+    
+    # 2. Value Lengths Box Plot
+    value_lengths = defaultdict(list)
+    for image_data in gold_data.values():
+        for key, value in image_data["structured_transcription"].items():
+            if value:  # Only include non-empty values
+                value_lengths[key].append(len(value))
+    
+    plt.figure(figsize=(15, 8))
+    plt.boxplot([lengths for lengths in value_lengths.values()], 
+                labels=value_lengths.keys(),
+                vert=False)
+    plt.title('Distribution of Value Lengths by Key')
+    plt.xlabel('Number of Characters')
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+    plt.savefig(f'{output_dir}/value_lengths_box.png')
+    plt.close()
+    
+    # 3. CER by Key Bar Chart
+    cer_by_key = defaultdict(list)
+    for image_file in set(gold_data.keys()) & set(pred_data.keys()):
+        if len(pred_data[image_file]) < 2:
+            continue
+            
+        gold_struct = gold_data[image_file]["structured_transcription"]
+        try:
+            pred_struct = parse_structured_prediction(pred_data[image_file][1]["response"])
+            for key, gold_value in gold_struct.items():
+                if gold_value and key.lower() in pred_struct and pred_struct[key.lower()]:
+                    error = cer(gold_value, pred_struct[key.lower()])
+                    cer_by_key[key].append(error)
+        except (json.JSONDecodeError, KeyError):
+            continue
+    
+    # Calculate average CER for each key
+    avg_cer_by_key = {k: np.mean(v) for k, v in cer_by_key.items() if v}
+    
+    plt.figure(figsize=(15, 8))
+    keys = list(avg_cer_by_key.keys())
+    values = list(avg_cer_by_key.values())
+    
+    plt.bar(keys, values)
+    plt.title('Character Error Rate by Key')
+    plt.xlabel('Key')
+    plt.ylabel('CER')
+    plt.xticks(rotation=45, ha='right')
+    plt.tight_layout()
+    plt.savefig(f'{output_dir}/cer_by_key_bar.png')
+    plt.close()
+    
+    return {
+        "key_counts": dict(key_counts),
+        "avg_value_lengths": {k: np.mean(v) for k, v in value_lengths.items()},
+        "cer_by_key": avg_cer_by_key
+    }
+
 if __name__ == "__main__":
     # Load data
     gold_data = load_gold_standard("madison_slates_annotation_omitted_removed/img_arr_prog.js")
@@ -358,6 +436,9 @@ if __name__ == "__main__":
     if gold_data and pred_data_2 and pred_data_3:
         # Run evaluations
         results_2 = evaluate_predictions(gold_data, pred_data_2)
+        
+        # Create visualizations
+        viz_stats = create_dataset_visualizations(gold_data, pred_data_2)
         
         # Evaluate just CER/WER for llava_output_3
         cer_wer_3 = {
@@ -430,3 +511,16 @@ if __name__ == "__main__":
         incorrect_values_sample = list(results_2["incorrect_values_all"])[:10]
         for value in incorrect_values_sample:
             print(f"  - {value}")
+
+        print("\nDataset Statistics:")
+        print("\nKey frequencies:")
+        for key, count in sorted(viz_stats["key_counts"].items(), key=lambda x: x[1], reverse=True):
+            print(f"{key}: {count}")
+        
+        print("\nAverage value lengths by key:")
+        for key, avg_length in sorted(viz_stats["avg_value_lengths"].items()):
+            print(f"{key}: {avg_length:.1f} characters")
+        
+        print("\nCER by key:")
+        for key, error in sorted(viz_stats["cer_by_key"].items()):
+            print(f"{key}: {error:.3f}")
