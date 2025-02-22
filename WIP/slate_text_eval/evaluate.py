@@ -1,7 +1,7 @@
 import json
 import re
 from pathlib import Path
-from mmif import Mmif, View
+from mmif import Mmif, View, AnnotationTypes, DocumentTypes
 from typing import Dict, List, Tuple
 from jiwer import wer, cer
 from collections import defaultdict, Counter
@@ -9,6 +9,7 @@ from dateutil import parser
 from datetime import datetime
 import matplotlib.pyplot as plt
 import numpy as np
+
 
 # Define the fields we want to extract from transcriptions
 FIELDS_OF_INTEREST = {
@@ -93,7 +94,7 @@ def parse_llava_text(text: str) -> Dict[str, str]:
 
 def load_predictions(predictions_dir: str) -> Dict[str, List[Dict[str, str]]]:
     """
-    Load prediction MMIF files and extract TextDocument annotations
+    Load prediction MMIF files and extract TextDocument annotation from last relevant view
     Returns a dictionary mapping image filenames to lists of prediction dictionaries
     """
     predictions = {}
@@ -111,13 +112,16 @@ def load_predictions(predictions_dir: str) -> Dict[str, List[Dict[str, str]]]:
                 print(f"Error loading MMIF file {mmif_file}: {e}")
                 continue
         
-        # Extract and parse text values from TextDocument annotations
+        # Extract and parse text value from last TextDocument view
         parsed_predictions = []
-        for view in mmif_data.views:
-            for annotation in view.annotations:
+        text_views = mmif_data.get_all_views_contain(DocumentTypes.TextDocument)
+        if text_views:
+            last_view = text_views[-1]
+            for annotation in last_view.annotations:
                 if annotation.at_type == "http://mmif.clams.ai/vocabulary/TextDocument/v1":
                     parsed_text = parse_llava_text(annotation.properties.text_value)
                     parsed_predictions.append(parsed_text)
+                    break  # Only take the first TextDocument from last view
         
         if parsed_predictions:
             predictions[image_filename] = parsed_predictions
@@ -432,35 +436,48 @@ if __name__ == "__main__":
     gold_data = load_gold_standard("madison_slates_annotation_omitted_removed/img_arr_prog.js")
     pred_data_2 = load_predictions("llava_output_2")
     pred_data_3 = load_predictions("llava_output_3")
+    janus_data = load_predictions("janus_output")
     
-    if gold_data and pred_data_2 and pred_data_3:
+    if gold_data and pred_data_2 and pred_data_3 and janus_data:
         # Run evaluations
         results_2 = evaluate_predictions(gold_data, pred_data_2)
         
         # Create visualizations
         viz_stats = create_dataset_visualizations(gold_data, pred_data_2)
         
-        # Evaluate just CER/WER for llava_output_3
-        cer_wer_3 = {
-            "cer": [],
-            "wer": []
-        }
+        # Evaluate CER/WER for llava_output_3 and janus_output
+        cer_wer_3 = {"cer": [], "wer": []}
+        cer_wer_janus = {"cer": [], "wer": []}
         
-        for image_file in set(gold_data.keys()) & set(pred_data_3.keys()):
+        # Compare all transcriptions
+        for image_file in set(gold_data.keys()) & set(pred_data_3.keys()) & set(janus_data.keys()):
             gold = gold_data[image_file]
-            preds = pred_data_3[image_file]
+            llava_preds = pred_data_3[image_file]
+            janus_preds = janus_data[image_file]
             
-            if len(preds) >= 1:
+            if len(llava_preds) >= 1:
+                # LLaVA metrics
                 metrics = evaluate_raw_transcription(
                     gold["raw_transcription"],
-                    preds[0]["response"]
+                    llava_preds[0]["response"]
                 )
                 cer_wer_3["cer"].append(metrics["cer"])
                 cer_wer_3["wer"].append(metrics["wer"])
+            
+            if len(janus_preds) >= 1:
+                # JANUS metrics
+                janus_metrics = evaluate_raw_transcription(
+                    gold["raw_transcription"],
+                    janus_preds[0]["response"]
+                )
+                cer_wer_janus["cer"].append(janus_metrics["cer"])
+                cer_wer_janus["wer"].append(janus_metrics["wer"])
         
-        # Calculate averages for llava_output_3
+        # Calculate averages
         avg_cer_3 = sum(cer_wer_3["cer"]) / len(cer_wer_3["cer"]) if cer_wer_3["cer"] else 0
         avg_wer_3 = sum(cer_wer_3["wer"]) / len(cer_wer_3["wer"]) if cer_wer_3["wer"] else 0
+        avg_cer_janus = sum(cer_wer_janus["cer"]) / len(cer_wer_janus["cer"]) if cer_wer_janus["cer"] else 0
+        avg_wer_janus = sum(cer_wer_janus["wer"]) / len(cer_wer_janus["wer"]) if cer_wer_janus["wer"] else 0
         
         # Print results
         print("\nDetailed Evaluation Report:")
@@ -472,6 +489,10 @@ if __name__ == "__main__":
         print("\nLLaVA Output 3:")
         print(f"  - Character Error Rate (CER): {avg_cer_3:.3f}")
         print(f"  - Word Error Rate (WER): {avg_wer_3:.3f}")
+        
+        print("\nJANUS Output:")
+        print(f"  - Character Error Rate (CER): {avg_cer_janus:.3f}")
+        print(f"  - Word Error Rate (WER): {avg_wer_janus:.3f}")
         
         # Continue with rest of existing output...
         print("\n2. Structured Fields Metrics (Exact field name and value matches):")
