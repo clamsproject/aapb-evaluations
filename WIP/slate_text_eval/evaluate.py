@@ -100,6 +100,12 @@ def load_predictions(predictions_dir: str) -> Dict[str, List[Dict[str, str]]]:
     predictions = {}
     pred_dir = Path(predictions_dir)
     
+    print(f"\nLoading predictions from {predictions_dir}")
+    
+    # Create set of keys to preserve (including "series")
+    preserve_keys = {key.lower() for key in FIELDS_OF_INTEREST}
+    preserve_keys.add("series")
+    
     for mmif_file in pred_dir.glob("*.mmif"):
         # Get corresponding image filename (replace .mmif with .jpg)
         image_filename = mmif_file.name.replace('.mmif', '.jpg')
@@ -119,8 +125,33 @@ def load_predictions(predictions_dir: str) -> Dict[str, List[Dict[str, str]]]:
             last_view = text_views[-1]
             for annotation in last_view.annotations:
                 if annotation.at_type == "http://mmif.clams.ai/vocabulary/TextDocument/v1":
-                    parsed_text = parse_llava_text(annotation.properties.text_value)
-                    parsed_predictions.append(parsed_text)
+                    raw_text = annotation.properties.text_value
+                    print(f"\nFile: {image_filename}")
+                    print(f"Raw text starts with: {raw_text[:100]}...")
+                    
+                    # Check if this is JANUS output (based on directory name)
+                    if "janus" in str(predictions_dir).lower():
+                        if ":" in raw_text:
+                            # Check if text before colon is a key we want to preserve
+                            prefix = raw_text.split(":", 1)[0].strip().lower()
+                            if prefix in preserve_keys:
+                                text = raw_text
+                            else:
+                                text = raw_text.split(":", 1)[1].strip()
+                        else:
+                            text = raw_text
+                        
+                        # Remove various types of quotation marks
+                        text = text.strip('`"\'')
+                        parsed_predictions.append({"response": text})
+                    else:
+                        parsed_text = parse_llava_text(raw_text)
+                        # Remove quotation marks from response
+                        if "response" in parsed_text:
+                            parsed_text["response"] = parsed_text["response"].strip('`"\'')
+                        parsed_predictions.append(parsed_text)
+                    
+                    print(f"Processed text starts with: {parsed_predictions[0]['response'][:100]}...")
                     break  # Only take the first TextDocument from last view
         
         if parsed_predictions:
@@ -299,10 +330,17 @@ def evaluate_predictions(gold_data: Dict, pred_data: Dict) -> Dict:
         "incorrect_values_all": set()
     }
     
+    print("\nDebugging evaluation process:")
+    print(f"Number of gold entries: {len(gold_data)}")
+    print(f"Number of pred entries: {len(pred_data)}")
+    
     # Evaluate each image
     for image_file in set(gold_data.keys()) & set(pred_data.keys()):
         gold = gold_data[image_file]
         preds = pred_data[image_file]
+        
+        print(f"\nProcessing file: {image_file}")
+        print(f"Number of predictions: {len(preds)}")
         
         if len(preds) >= 1:
             raw_metrics = evaluate_raw_transcription(
@@ -314,12 +352,14 @@ def evaluate_predictions(gold_data: Dict, pred_data: Dict) -> Dict:
         
         if len(preds) >= 2:
             pred_struct = parse_structured_prediction(preds[1]["response"])
+            print(f"Structured prediction keys: {list(pred_struct.keys())}")
             
-            # Existing evaluations
             struct_metrics = evaluate_structured_fields(
                 gold["structured_transcription"],
                 pred_struct
             )
+            print(f"Structured metrics: {struct_metrics}")
+            
             for metric, value in struct_metrics.items():
                 results["structured_fields"][metric].append(value)
             
@@ -344,14 +384,18 @@ def evaluate_predictions(gold_data: Dict, pred_data: Dict) -> Dict:
                 else:
                     results["incorrect_values_all"].update(value)
     
+    print("\nFinal results structure:")
+    for key, value in results.items():
+        if key != "overall":
+            print(f"{key}: {dict(value)}")
+    
     # Calculate averages
     for eval_type in ["raw_transcription", "structured_fields"]:
         for metric, values in results[eval_type].items():
             results["overall"][f"{eval_type}_{metric}_avg"] = sum(values) / len(values) if values else 0
     
-    # Calculate date metrics averages
-    for metric, values in results["dates"].items():
-        results["overall"][f"dates_{metric}_avg"] = sum(values) / len(values) if values else 0
+    print("\nOverall metrics:")
+    print(results["overall"])
     
     return results
 
@@ -431,48 +475,91 @@ def create_dataset_visualizations(gold_data: Dict, pred_data: Dict, output_dir: 
         "cer_by_key": avg_cer_by_key
     }
 
+def evaluate_date_extraction(gold_dict: Dict[str, str], pred_text: str) -> Dict[str, int]:
+    """
+    Evaluate date extraction from llava_output
+    Returns counts of correct and incorrect dates
+    """
+    # Extract all dates from gold standard
+    gold_dates = set()
+    for value in gold_dict.values():
+        normalized_date = normalize_date(value)
+        try:
+            datetime.strptime(normalized_date, '%Y-%m-%d')
+            gold_dates.add(normalized_date)
+        except (ValueError, TypeError):
+            continue
+
+    # Extract dates from prediction
+    # Split by comma and clean up each date
+    pred_dates = set()
+    incorrect_dates = set()
+    for date_str in pred_text.split(','):
+        normalized_date = normalize_date(date_str.strip())
+        try:
+            datetime.strptime(normalized_date, '%Y-%m-%d')
+            pred_dates.add(normalized_date)
+            if normalized_date not in gold_dates:
+                incorrect_dates.add(normalized_date)
+        except (ValueError, TypeError):
+            continue
+
+    return {
+        "correct_dates": len(gold_dates & pred_dates),  # intersection
+        "total_gold_dates": len(gold_dates),
+        "incorrect_dates": len(incorrect_dates),
+        "incorrect_dates_examples": list(incorrect_dates)
+    }
+
 if __name__ == "__main__":
     # Load data
     gold_data = load_gold_standard("madison_slates_annotation_omitted_removed/img_arr_prog.js")
-    pred_data_2 = load_predictions("llava_output_2")
-    pred_data_3 = load_predictions("llava_output_3")
+    llava_dates = load_predictions("llava_output")
+    llava_struct = load_predictions("llava_output_2")
+    llava_trans = load_predictions("llava_output_3")
     janus_data = load_predictions("janus_output")
     
-    if gold_data and pred_data_2 and pred_data_3 and janus_data:
-        # Run evaluations
-        results_2 = evaluate_predictions(gold_data, pred_data_2)
+    if gold_data and llava_dates and llava_struct and llava_trans and janus_data:
+        print("\nEvaluating date extraction (llava_output)...")
+        date_results = defaultdict(list)
+        for image_file in set(gold_data.keys()) & set(llava_dates.keys()):
+            if len(llava_dates[image_file]) >= 1:
+                metrics = evaluate_date_extraction(
+                    gold_data[image_file]["structured_transcription"],
+                    llava_dates[image_file][0]["response"]
+                )
+                for key, value in metrics.items():
+                    if key != "incorrect_dates_examples":
+                        date_results[key].append(value)
         
-        # Create visualizations
-        viz_stats = create_dataset_visualizations(gold_data, pred_data_2)
+        print("\nEvaluating structured fields (llava_output_2)...")
+        results_2 = evaluate_predictions(gold_data, llava_struct)
         
+        print("\nEvaluating transcription quality...")
         # Evaluate CER/WER for llava_output_3 and janus_output
         cer_wer_3 = {"cer": [], "wer": []}
         cer_wer_janus = {"cer": [], "wer": []}
         
-        # Compare all transcriptions
-        for image_file in set(gold_data.keys()) & set(pred_data_3.keys()) & set(janus_data.keys()):
-            gold = gold_data[image_file]
-            llava_preds = pred_data_3[image_file]
-            janus_preds = janus_data[image_file]
+        # Compare transcriptions
+        for image_file in set(gold_data.keys()) & set(llava_trans.keys()) & set(janus_data.keys()):
+            gold = gold_data[image_file]["raw_transcription"]
             
-            if len(llava_preds) >= 1:
-                # LLaVA metrics
+            if len(llava_trans[image_file]) >= 1:
                 metrics = evaluate_raw_transcription(
-                    gold["raw_transcription"],
-                    llava_preds[0]["response"]
+                    gold,
+                    llava_trans[image_file][0]["response"]
                 )
                 cer_wer_3["cer"].append(metrics["cer"])
                 cer_wer_3["wer"].append(metrics["wer"])
             
-            if len(janus_preds) >= 1:
-                # JANUS metrics
-                janus_metrics = evaluate_raw_transcription(
-                    gold["raw_transcription"],
-                    janus_preds[0]["response"]
+            if len(janus_data[image_file]) >= 1:
+                metrics = evaluate_raw_transcription(
+                    gold,
+                    janus_data[image_file][0]["response"]
                 )
-                cer_wer_janus["cer"].append(janus_metrics["cer"])
-                cer_wer_janus["wer"].append(janus_metrics["wer"])
-        
+                cer_wer_janus["cer"].append(metrics["cer"])
+                cer_wer_janus["wer"].append(metrics["wer"])
+
         # Calculate averages
         avg_cer_3 = sum(cer_wer_3["cer"]) / len(cer_wer_3["cer"]) if cer_wer_3["cer"] else 0
         avg_wer_3 = sum(cer_wer_3["wer"]) / len(cer_wer_3["wer"]) if cer_wer_3["wer"] else 0
@@ -481,11 +568,50 @@ if __name__ == "__main__":
         
         # Print results
         print("\nDetailed Evaluation Report:")
-        print("\n1. Raw Transcription Metrics:")
-        print("\nLLaVA Output 2:")
-        print(f"  - Character Error Rate (CER): {results_2['overall']['raw_transcription_cer_avg']:.3f}")
-        print(f"  - Word Error Rate (WER): {results_2['overall']['raw_transcription_wer_avg']:.3f}")
         
+        print("\n1. Date Extraction Metrics (llava_output):")
+        total_gold_dates = sum(date_results["total_gold_dates"])
+        total_correct_dates = sum(date_results["correct_dates"])
+        total_incorrect_dates = sum(date_results["incorrect_dates"])
+        print(f"  - Total dates in gold standard: {total_gold_dates}")
+        if total_gold_dates > 0:
+            recall = (total_correct_dates/total_gold_dates)*100
+            print(f"  - Dates correctly identified: {total_correct_dates} ({recall:.1f}% recall)")
+        print(f"  - Incorrect dates in predictions: {total_incorrect_dates}")
+        
+        print("\n2. Structured Field Metrics (llava_output_2):")
+        total_gold_fields = sum(results_2["structured_fields"]["total"])
+        total_correct_fields = sum(results_2["structured_fields"]["correct"])
+        print(f"  - Total fields in gold standard: {total_gold_fields}")
+        if total_gold_fields > 0:
+            accuracy = (total_correct_fields/total_gold_fields)*100
+            print(f"  - Fields correctly identified: {total_correct_fields} ({accuracy:.1f}% accuracy)")
+        
+        # Date matching regardless of field
+        total_gold_dates = sum(results_2["dates"]["total_gold_dates"])
+        total_correct_dates = sum(results_2["dates"]["correct_dates"])
+        total_incorrect_dates = sum(results_2["dates"]["incorrect_pred_dates"])
+        print("\n  Date matching (regardless of field):")
+        print(f"    - Total dates in gold: {total_gold_dates}")
+        if total_gold_dates > 0:
+            recall = (total_correct_dates/total_gold_dates)*100
+            print(f"    - Dates correctly identified: {total_correct_dates} ({recall:.1f}% recall)")
+        print(f"    - Incorrect dates in predictions: {total_incorrect_dates}")
+        
+        # Non-date value matching regardless of field
+        total_gold_values = sum(results_2["non_date_fields"]["total_gold_values"])
+        total_correct_values = sum(results_2["non_date_fields"]["correct_values"])
+        total_pred_values = sum(results_2["non_date_fields"]["total_pred_values"])
+        print("\n  Non-date value matching (regardless of field):")
+        print(f"    - Total values in gold: {total_gold_values}")
+        if total_gold_values > 0:
+            recall = (total_correct_values/total_gold_values)*100
+            print(f"    - Values correctly identified: {total_correct_values} ({recall:.1f}% recall)")
+        if total_pred_values > 0:
+            precision = (total_correct_values/total_pred_values)*100
+            print(f"    - Precision: {precision:.1f}%")
+        
+        print("\n3. Raw Transcription Metrics:")
         print("\nLLaVA Output 3:")
         print(f"  - Character Error Rate (CER): {avg_cer_3:.3f}")
         print(f"  - Word Error Rate (WER): {avg_wer_3:.3f}")
@@ -493,55 +619,3 @@ if __name__ == "__main__":
         print("\nJANUS Output:")
         print(f"  - Character Error Rate (CER): {avg_cer_janus:.3f}")
         print(f"  - Word Error Rate (WER): {avg_wer_janus:.3f}")
-        
-        # Continue with rest of existing output...
-        print("\n2. Structured Fields Metrics (Exact field name and value matches):")
-        print(f"  - Field-level Accuracy: {results_2['overall']['structured_fields_accuracy_avg']:.3f}")
-        
-        # Date metrics
-        total_gold_dates = sum(results_2['dates']['total_gold_dates'])
-        total_correct_dates = sum(results_2['dates']['correct_dates'])
-        total_incorrect_dates = sum(results_2['dates']['incorrect_pred_dates'])
-        
-        print("\n3. Date Identification Metrics:")
-        print("  These metrics evaluate date matching regardless of field names")
-        print(f"  - Total dates in gold standard: {total_gold_dates}")
-        print(f"  - Dates correctly identified: {total_correct_dates} ({(total_correct_dates/total_gold_dates)*100:.1f}% recall)")
-        print(f"  - Incorrect dates in predictions: {total_incorrect_dates}")
-        
-        # Non-date field metrics
-        total_gold_values = sum(results_2['non_date_fields']['total_gold_values'])
-        total_correct_values = sum(results_2['non_date_fields']['correct_values'])
-        total_pred_values = sum(results_2['non_date_fields']['total_pred_values'])
-        total_incorrect_values = sum(results_2['non_date_fields']['incorrect_values'])
-        
-        print("\n4. Non-Date Field Metrics:")
-        print("  These metrics evaluate value matching regardless of field names")
-        print(f"  - Total values in gold standard: {total_gold_values}")
-        print(f"  - Values correctly identified: {total_correct_values} ({(total_correct_values/total_gold_values)*100:.1f}% recall)")
-        print(f"  - Total values in predictions: {total_pred_values}")
-        print(f"  - Incorrect values in predictions: {total_incorrect_values}")
-        print(f"  - Precision: {(total_correct_values/total_pred_values)*100:.1f}%")
-        
-        print("\n5. Sample of incorrect dates found in predictions:")
-        incorrect_dates_sample = list(results_2["incorrect_dates_all"])[:10]
-        for date in incorrect_dates_sample:
-            print(f"  - {date}")
-            
-        print("\n6. Sample of incorrect non-date values found in predictions:")
-        incorrect_values_sample = list(results_2["incorrect_values_all"])[:10]
-        for value in incorrect_values_sample:
-            print(f"  - {value}")
-
-        print("\nDataset Statistics:")
-        print("\nKey frequencies:")
-        for key, count in sorted(viz_stats["key_counts"].items(), key=lambda x: x[1], reverse=True):
-            print(f"{key}: {count}")
-        
-        print("\nAverage value lengths by key:")
-        for key, avg_length in sorted(viz_stats["avg_value_lengths"].items()):
-            print(f"{key}: {avg_length:.1f} characters")
-        
-        print("\nCER by key:")
-        for key, error in sorted(viz_stats["cer_by_key"].items()):
-            print(f"{key}: {error:.3f}")
