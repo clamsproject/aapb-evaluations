@@ -512,110 +512,117 @@ def evaluate_date_extraction(gold_dict: Dict[str, str], pred_text: str) -> Dict[
     }
 
 if __name__ == "__main__":
-    # Load data
-    gold_data = load_gold_standard("madison_slates_annotation_omitted_removed/img_arr_prog.js")
+    # Load predictions
     llava_dates = load_predictions("llava_output")
     llava_struct = load_predictions("llava_output_2")
     llava_trans = load_predictions("llava_output_3")
     janus_data = load_predictions("janus_output")
     
-    if gold_data and llava_dates and llava_struct and llava_trans and janus_data:
-        print("\nEvaluating date extraction (llava_output)...")
-        date_results = defaultdict(list)
-        for image_file in set(gold_data.keys()) & set(llava_dates.keys()):
+    print("\nEvaluating date extraction (llava_output)...")
+    # Load fresh gold data for date extraction
+    gold_data_dates = load_gold_standard("madison_slates_annotation_omitted_removed/img_arr_prog.js")
+    date_results = defaultdict(list)
+    
+    if gold_data_dates and llava_dates:
+        for image_file in set(gold_data_dates.keys()) & set(llava_dates.keys()):
             if len(llava_dates[image_file]) >= 1:
                 metrics = evaluate_date_extraction(
-                    gold_data[image_file]["structured_transcription"],
+                    gold_data_dates[image_file]["structured_transcription"],
                     llava_dates[image_file][0]["response"]
                 )
                 for key, value in metrics.items():
                     if key != "incorrect_dates_examples":
                         date_results[key].append(value)
+    
+    print("\nEvaluating structured fields (llava_output_2)...")
+    # Load fresh gold data for structured evaluation
+    gold_data_struct = load_gold_standard("madison_slates_annotation_omitted_removed/img_arr_prog.js")
+    
+    if gold_data_struct and llava_struct:
+        results_2 = evaluate_predictions(gold_data_struct, llava_struct)
+    
+    print("\nEvaluating transcription quality...")
+    # Load fresh gold data for transcription evaluation
+    gold_data_trans = load_gold_standard("madison_slates_annotation_omitted_removed/img_arr_prog.js")
+    cer_wer_3 = {"cer": [], "wer": []}
+    cer_wer_janus = {"cer": [], "wer": []}
+    
+    # Compare transcriptions
+    for image_file in set(gold_data_trans.keys()) & set(llava_trans.keys()) & set(janus_data.keys()):
+        gold = gold_data_trans[image_file]["raw_transcription"]
         
-        print("\nEvaluating structured fields (llava_output_2)...")
-        results_2 = evaluate_predictions(gold_data, llava_struct)
+        if len(llava_trans[image_file]) >= 1:
+            metrics = evaluate_raw_transcription(
+                gold,
+                llava_trans[image_file][0]["response"]
+            )
+            cer_wer_3["cer"].append(metrics["cer"])
+            cer_wer_3["wer"].append(metrics["wer"])
         
-        print("\nEvaluating transcription quality...")
-        # Evaluate CER/WER for llava_output_3 and janus_output
-        cer_wer_3 = {"cer": [], "wer": []}
-        cer_wer_janus = {"cer": [], "wer": []}
-        
-        # Compare transcriptions
-        for image_file in set(gold_data.keys()) & set(llava_trans.keys()) & set(janus_data.keys()):
-            gold = gold_data[image_file]["raw_transcription"]
-            
-            if len(llava_trans[image_file]) >= 1:
-                metrics = evaluate_raw_transcription(
-                    gold,
-                    llava_trans[image_file][0]["response"]
-                )
-                cer_wer_3["cer"].append(metrics["cer"])
-                cer_wer_3["wer"].append(metrics["wer"])
-            
-            if len(janus_data[image_file]) >= 1:
-                metrics = evaluate_raw_transcription(
-                    gold,
-                    janus_data[image_file][0]["response"]
-                )
-                cer_wer_janus["cer"].append(metrics["cer"])
-                cer_wer_janus["wer"].append(metrics["wer"])
+        if len(janus_data[image_file]) >= 1:
+            metrics = evaluate_raw_transcription(
+                gold,
+                janus_data[image_file][0]["response"]
+            )
+            cer_wer_janus["cer"].append(metrics["cer"])
+            cer_wer_janus["wer"].append(metrics["wer"])
 
-        # Calculate averages
-        avg_cer_3 = sum(cer_wer_3["cer"]) / len(cer_wer_3["cer"]) if cer_wer_3["cer"] else 0
-        avg_wer_3 = sum(cer_wer_3["wer"]) / len(cer_wer_3["wer"]) if cer_wer_3["wer"] else 0
-        avg_cer_janus = sum(cer_wer_janus["cer"]) / len(cer_wer_janus["cer"]) if cer_wer_janus["cer"] else 0
-        avg_wer_janus = sum(cer_wer_janus["wer"]) / len(cer_wer_janus["wer"]) if cer_wer_janus["wer"] else 0
-        
-        # Print results
-        print("\nDetailed Evaluation Report:")
-        
-        print("\n1. Date Extraction Metrics (llava_output):")
-        total_gold_dates = sum(date_results["total_gold_dates"])
-        total_correct_dates = sum(date_results["correct_dates"])
-        total_incorrect_dates = sum(date_results["incorrect_dates"])
-        print(f"  - Total dates in gold standard: {total_gold_dates}")
-        if total_gold_dates > 0:
-            recall = (total_correct_dates/total_gold_dates)*100
-            print(f"  - Dates correctly identified: {total_correct_dates} ({recall:.1f}% recall)")
-        print(f"  - Incorrect dates in predictions: {total_incorrect_dates}")
-        
-        print("\n2. Structured Field Metrics (llava_output_2):")
-        total_gold_fields = sum(results_2["structured_fields"]["total"])
-        total_correct_fields = sum(results_2["structured_fields"]["correct"])
-        print(f"  - Total fields in gold standard: {total_gold_fields}")
-        if total_gold_fields > 0:
-            accuracy = (total_correct_fields/total_gold_fields)*100
-            print(f"  - Fields correctly identified: {total_correct_fields} ({accuracy:.1f}% accuracy)")
-        
-        # Date matching regardless of field
-        total_gold_dates = sum(results_2["dates"]["total_gold_dates"])
-        total_correct_dates = sum(results_2["dates"]["correct_dates"])
-        total_incorrect_dates = sum(results_2["dates"]["incorrect_pred_dates"])
-        print("\n  Date matching (regardless of field):")
-        print(f"    - Total dates in gold: {total_gold_dates}")
-        if total_gold_dates > 0:
-            recall = (total_correct_dates/total_gold_dates)*100
-            print(f"    - Dates correctly identified: {total_correct_dates} ({recall:.1f}% recall)")
-        print(f"    - Incorrect dates in predictions: {total_incorrect_dates}")
-        
-        # Non-date value matching regardless of field
-        total_gold_values = sum(results_2["non_date_fields"]["total_gold_values"])
-        total_correct_values = sum(results_2["non_date_fields"]["correct_values"])
-        total_pred_values = sum(results_2["non_date_fields"]["total_pred_values"])
-        print("\n  Non-date value matching (regardless of field):")
-        print(f"    - Total values in gold: {total_gold_values}")
-        if total_gold_values > 0:
-            recall = (total_correct_values/total_gold_values)*100
-            print(f"    - Values correctly identified: {total_correct_values} ({recall:.1f}% recall)")
-        if total_pred_values > 0:
-            precision = (total_correct_values/total_pred_values)*100
-            print(f"    - Precision: {precision:.1f}%")
-        
-        print("\n3. Raw Transcription Metrics:")
-        print("\nLLaVA Output 3:")
-        print(f"  - Character Error Rate (CER): {avg_cer_3:.3f}")
-        print(f"  - Word Error Rate (WER): {avg_wer_3:.3f}")
-        
-        print("\nJANUS Output:")
-        print(f"  - Character Error Rate (CER): {avg_cer_janus:.3f}")
-        print(f"  - Word Error Rate (WER): {avg_wer_janus:.3f}")
+    # Calculate averages
+    avg_cer_3 = sum(cer_wer_3["cer"]) / len(cer_wer_3["cer"]) if cer_wer_3["cer"] else 0
+    avg_wer_3 = sum(cer_wer_3["wer"]) / len(cer_wer_3["wer"]) if cer_wer_3["wer"] else 0
+    avg_cer_janus = sum(cer_wer_janus["cer"]) / len(cer_wer_janus["cer"]) if cer_wer_janus["cer"] else 0
+    avg_wer_janus = sum(cer_wer_janus["wer"]) / len(cer_wer_janus["wer"]) if cer_wer_janus["wer"] else 0
+    
+    # Print results
+    print("\nDetailed Evaluation Report:")
+    
+    print("\n1. Date Extraction Metrics (llava_output):")
+    total_gold_dates = sum(date_results["total_gold_dates"])
+    total_correct_dates = sum(date_results["correct_dates"])
+    total_incorrect_dates = sum(date_results["incorrect_dates"])
+    print(f"  - Total dates in gold standard: {total_gold_dates}")
+    if total_gold_dates > 0:
+        recall = (total_correct_dates/total_gold_dates)*100
+        print(f"  - Dates correctly identified: {total_correct_dates} ({recall:.1f}% recall)")
+    print(f"  - Incorrect dates in predictions: {total_incorrect_dates}")
+    
+    print("\n2. Structured Field Metrics (llava_output_2):")
+    total_gold_fields = sum(results_2["structured_fields"]["total"])
+    total_correct_fields = sum(results_2["structured_fields"]["correct"])
+    print(f"  - Total fields in gold standard: {total_gold_fields}")
+    if total_gold_fields > 0:
+        accuracy = (total_correct_fields/total_gold_fields)*100
+        print(f"  - Fields correctly identified: {total_correct_fields} ({accuracy:.1f}% accuracy)")
+    
+    # Date matching regardless of field
+    total_gold_dates = sum(results_2["dates"]["total_gold_dates"])
+    total_correct_dates = sum(results_2["dates"]["correct_dates"])
+    total_incorrect_dates = sum(results_2["dates"]["incorrect_pred_dates"])
+    print("\n  Date matching (regardless of field):")
+    print(f"    - Total dates in gold: {total_gold_dates}")
+    if total_gold_dates > 0:
+        recall = (total_correct_dates/total_gold_dates)*100
+        print(f"    - Dates correctly identified: {total_correct_dates} ({recall:.1f}% recall)")
+    print(f"    - Incorrect dates in predictions: {total_incorrect_dates}")
+    
+    # Non-date value matching regardless of field
+    total_gold_values = sum(results_2["non_date_fields"]["total_gold_values"])
+    total_correct_values = sum(results_2["non_date_fields"]["correct_values"])
+    total_pred_values = sum(results_2["non_date_fields"]["total_pred_values"])
+    print("\n  Non-date value matching (regardless of field):")
+    print(f"    - Total values in gold: {total_gold_values}")
+    if total_gold_values > 0:
+        recall = (total_correct_values/total_gold_values)*100
+        print(f"    - Values correctly identified: {total_correct_values} ({recall:.1f}% recall)")
+    if total_pred_values > 0:
+        precision = (total_correct_values/total_pred_values)*100
+        print(f"    - Precision: {precision:.1f}%")
+    
+    print("\n3. Raw Transcription Metrics:")
+    print("\nLLaVA Output 3:")
+    print(f"  - Character Error Rate (CER): {avg_cer_3:.3f}")
+    print(f"  - Word Error Rate (WER): {avg_wer_3:.3f}")
+    
+    print("\nJANUS Output:")
+    print(f"  - Character Error Rate (CER): {avg_cer_janus:.3f}")
+    print(f"  - Word Error Rate (WER): {avg_wer_janus:.3f}")
