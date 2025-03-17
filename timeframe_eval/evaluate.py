@@ -13,8 +13,7 @@ from mmif.utils import video_document_helper as vdh
 from pyannote.core import Segment, Timeline, Annotation
 from pyannote.metrics.detection import DetectionErrorRate, DetectionPrecisionRecallFMeasure
 
-import goldretriever
-
+from clams_utils.aapb import goldretriever
 import sys
 import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))

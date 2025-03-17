@@ -19,7 +19,7 @@ ner_eval:
   pred_file: "-m"
   side_by_side: "--side_by_side"
   result_file: "-r"
-  source_directory: "--source_directory"
+#  source_directory: "--source_directory"  # removed because it is no longer in use
 ocr_eval:
   pred_file: "-m"
   gold_file: "-g"

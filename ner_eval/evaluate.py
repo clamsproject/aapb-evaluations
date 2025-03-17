@@ -7,7 +7,7 @@ from lapps.discriminators import Uri
 from mmif.serialize import Mmif
 from seqeval.metrics import classification_report
 
-from goldretriever import download_golds
+from clams_utils.aapb.goldretriever import download_golds
 
 import sys
 import os

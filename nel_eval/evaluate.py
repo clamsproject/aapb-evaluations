@@ -22,7 +22,6 @@ from mmif.serialize import Mmif
 import os
 import pandas as pd
 
-import goldretriever
 from nel import NamedEntityLink
 
 import sys

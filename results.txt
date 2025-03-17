@@ -1,0 +1,70 @@
+{
+    "cpb-aacip-507-v40js9j432": {
+        "WER-case-sensitive": 0.14425453047775946,
+        "WER-case-insens": 0.12716227347611203
+    },
+    "cpb-aacip-507-pc2t43js98": {
+        "WER-case-sensitive": 0.2548835265851875,
+        "WER-case-insens": 0.22114279745116475
+    },
+    "cpb-aacip-507-r785h7cp0z": {
+        "WER-case-sensitive": 0.1450736126840317,
+        "WER-case-insens": 0.12978482446206116
+    },
+    "cpb-aacip-507-6w96689725": {
+        "WER-case-sensitive": 0.1596869712351946,
+        "WER-case-insens": 0.13261421319796954
+    },
+    "cpb-aacip-507-n29p26qt59": {
+        "WER-case-sensitive": 0.2810162893146194,
+        "WER-case-insens": 0.24823276303657413
+    },
+    "cpb-aacip-507-v11vd6pz5w": {
+        "WER-case-sensitive": 0.21525201832860572,
+        "WER-case-insens": 0.19397774383591534
+    },
+    "cpb-aacip-507-4t6f18t178": {
+        "WER-case-sensitive": 0.27868209452833886,
+        "WER-case-insens": 0.2520101980780545
+    },
+    "cpb-aacip-507-zw18k75z4h": {
+        "WER-case-sensitive": 0.18849774866966845,
+        "WER-case-insens": 0.1735571019238641
+    },
+    "cpb-aacip-507-zk55d8pd1h": {
+        "WER-case-sensitive": 0.2092478421701603,
+        "WER-case-insens": 0.1881627620221948
+    },
+    "cpb-aacip-507-4746q1t25k": {
+        "WER-case-sensitive": 0.21948966632028635,
+        "WER-case-insens": 0.19074009929569333
+    },
+    "cpb-aacip-507-vm42r3pt6h": {
+        "WER-case-sensitive": 0.16413673947920523,
+        "WER-case-insens": 0.14747624336665432
+    },
+    "cpb-aacip-507-9882j68s35": {
+        "WER-case-sensitive": 0.21519968980224893,
+        "WER-case-insens": 0.20085304381543234
+    },
+    "cpb-aacip-507-1v5bc3tf81": {
+        "WER-case-sensitive": 0.16376975169300226,
+        "WER-case-insens": 0.14311512415349886
+    },
+    "cpb-aacip-507-6h4cn6zk04": {
+        "WER-case-sensitive": 0.2093560814529444,
+        "WER-case-insens": 0.182168409466153
+    },
+    "cpb-aacip-507-7659c6sk7z": {
+        "WER-case-sensitive": 0.2064343163538874,
+        "WER-case-insens": 0.19422103068215668
+    },
+    "cpb-aacip-507-154dn40c26": {
+        "WER-case-sensitive": 0.14800884955752214,
+        "WER-case-insens": 0.1297566371681416
+    },
+    "Average": {
+        "WER-case-sensitive": 0.2001868580407914,
+        "WER-case-insens": 0.17843595408947754
+    }
+}
