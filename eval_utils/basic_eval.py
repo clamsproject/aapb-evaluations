@@ -1,8 +1,7 @@
 import json
 import os
 import fnmatch
-import goldretriever
-from clams_utils.aapb import guidhandler
+from clams_utils.aapb import goldretriever, guidhandler
 import csv
 from brat_parser import get_entities_relations_attributes_groups  # install this dependency for tests
 from mmif import Mmif
@@ -10,11 +9,9 @@ from typing import Any
 from jiwer import wer, cer
 
 
-# TODO: update ner to remove the source directory, it doesn't seem to be used
-# TODO: implement a function for common evaluation metrics?
-# TODO: merge these three classes
-# TODO: remove the local goldretriever
-# TODO: reconsider implementing something for side-by-side?
+# TODO: reconsider implementing something for side-by-side?  - right now there seems to be an issue geting side-by-side working
+# TODO: change the name of the sr evaluations
+# TODO: do more concise tests on my package as a whole
 
 
 # STATIC EVALUATION TOOLS:
@@ -154,12 +151,12 @@ class OutputEval:
         werS_sum = 0
         werI_sum = 0
         for r in result:
-            output_dict[r[0]] = {'WER-case-sensitive': r[1], 'WER-case-insens': r[2]}
+            output_dict[r[0]] = {'case-sensitive': r[1], 'case-insensitive': r[2]}
             werS_sum += r[1]
             werI_sum += r[2]
         if len(result):
-            output_dict['Average'] = {'WER-case-sensitive': werS_sum / len(result),
-                                      'WER-case-insens': werI_sum / len(result)}
+            output_dict['Average'] = {'case-sensitive': werS_sum / len(result),
+                                      'case-insensitive': werI_sum / len(result)}
 
         # if we have basic metrics
         if "basic_metrics" in eval_methods:
@@ -211,8 +208,6 @@ class OutputEval:
                 comp['cer'] = str(cer(pred_text, gold_text))
         return vals
 
-    # This is a naive implementation I got from sr eval, should we consider lightweight packages like huggingface's
-    # evaluation libraries?
     def basic_metrics(self):
         tp = self.confusion_matrix[0]
         fp = self.confusion_matrix[1]

@@ -34,8 +34,8 @@ def ner_test():
     arguments = construct_arguments({
                                      'pred_file': 'ner_eval/preds@spacy-wrapper@aapb-collaboration-21/',
                                      'gold_file': 'golds/ner/', 'slate': False, 'chyron': False,
-                                     'side_by_side': None, 'result_file': 'results.txt', 'thresholds': '',
-                                     'source_directory': None,
+                                     'side_by_side': 'side_by_side',
+                                     'result_file': 'results.txt', 'thresholds': '', 'source_directory': None,
                                      'count_subtypes': False}, 'ner_eval')
     run_script(script_path, arguments)
 
@@ -90,6 +90,6 @@ def all_tests():
     nel_test()
     ocr_test()
     sr_test()
+    print("tests complete")
 
-
-sr_test()
+asr_test()
