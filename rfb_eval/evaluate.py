@@ -21,7 +21,7 @@ from clams_utils.aapb import guidhandler, goldretriever
 import pandas as pd
 import numpy as np
 
-GOLD_URL = 'https://github.com/clamsproject/aapb-annotations/tree/89-rfb-gold/role-filler-binding/golds'
+GOLD_URL = 'https://github.com/clamsproject/aapb-annotations/tree/main/role-filler-binding/golds'
 SWT_APP = 'http://apps.clams.ai/swt-detection/v6.1'
 RFB_APP = 'http://apps.clams.ai/role-filler-binder/v1.0'
 
