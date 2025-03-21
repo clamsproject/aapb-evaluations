@@ -1,0 +1,4 @@
+- app: https://github.com/clamsproject/app-paddleocr-wrapper/becfa66 (not a released version)
+- source: https://github.com/clamsproject/app-paddleocr-wrapper/tree/becfa668c2f33c439cf5a60e679cb5511a8d31da
+- batch: https://github.com/clamsproject/aapb-annotations/blob/80a36781fd55b5b8cb74f2de187be026f1ecbb7f/batches/batch2.txt
+- prediction MMIFs (on brandeis server): `swt-detection/v5.1/d41d8cd98f00b204e9800998ecf8427e/paddleocr-wrapper/becfa66/d41d8cd98f00b204e9800998ecf8427e`

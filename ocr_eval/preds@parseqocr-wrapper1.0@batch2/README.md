@@ -1,3 +1,4 @@
 - app: https://apps.clams.ai/parseqocr-wrapper/v1.0/
 - source: https://github.com/clamsproject/app-parseqocr-wrapper
 - batch: https://github.com/clamsproject/aapb-annotations/blob/80a36781fd55b5b8cb74f2de187be026f1ecbb7f/batches/batch2.txt
+- prediction MMIFs (on brandeis server): `east-textdetection/v1.1/876fdd02d97f7780f88db0a0a60e997a/parseqocr-wrapper/v1.0/d41d8cd98f00b204e9800998ecf8427e`
