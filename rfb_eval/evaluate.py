@@ -13,6 +13,7 @@ from io import StringIO
 from argparse import ArgumentParser, Namespace
 import logging
 import multiprocessing as mp
+import time
 
 from thefuzz import fuzz
 from mmif import Mmif, AnnotationTypes, View, Annotation
@@ -30,53 +31,6 @@ RFB_APP = 'http://apps.clams.ai/role-filler-binder/v1.0'
 # --------------------------------------------------------------------
 
 
-def get_adj_aligned_ann(ann: Annotation, view: View) -> Union[None, Annotation]:
-    """
-    Get the aligned annotation residing in adjacent view
-
-    :param ann: any type of annotation
-    :param view: the view that contains both input annotation and alignments
-
-    :return: either None type or an aligned annotation found in adjacent view
-    """
-    for al in view.get_annotations(AnnotationTypes.Alignment):
-        if aligned_ann := ann.aligned_to_by(al):
-            return aligned_ann
-
-
-def get_aligned_ann_of(
-        mmif: Mmif,
-        source: Annotation,
-        source_app: str,
-        target_app: str
-        ) -> Optional[Annotation]:
-    """
-    Get the aligned annotation of the input annotation cross views in MMIF
-
-    :param: mmif: the mmif file
-    :param: source: the source annotation that looks for its aligned annotation in target view
-    :param: source_app: the app that contains source annotation
-    :param: target_app: the app that might contain target aligned annotation
-
-    :return: either None type or an annotation
-    """
-    valid_views = {view.metadata.app: view
-                   for view in mmif.views if not (view.has_error() or view.has_warnings())}
-
-    # Validate if two apps are in mmif
-    if not (source_app and target_app) in valid_views:
-        raise ValueError(f"Either {source_app} or {target_app} is not in mmif")
-    # TODO: Think about more edge cases
-    current_view = valid_views[source_app]
-    target_view = valid_views[target_app]
-    current_ann = source
-    while current_view.id != target_view.id:
-        next_ann = get_adj_aligned_ann(current_ann, current_view)
-        current_view = mmif.get_view_by_id(next_ann.parent)
-        current_ann = next_ann
-    return current_ann
-
-
 def csv_string_to_pair(csv_string: str) -> Set[Tuple[str, str]]:
     """
     Convert csv-string to a set of pairs represeted by tuples
@@ -84,8 +38,71 @@ def csv_string_to_pair(csv_string: str) -> Set[Tuple[str, str]]:
     :param: csv_string: the csv-formatted string
     :return: a set of tuples of (role, filler) string
     """
-    return set(pd.read_csv(StringIO(csv_string), index_col=0).fillna('nan').itertuples(index=False, name=None))
-    # FIXME: Empty role/filler is filled with string 'nan'
+    # Optimize this function since profiling showed it's slow
+    if not csv_string.strip():
+        return set()
+        
+    # Use pandas only if we have a substantial amount of data
+    if len(csv_string) > 1000 or csv_string.count('\n') > 10:
+        return set(pd.read_csv(StringIO(csv_string), index_col=0).fillna('nan').itertuples(index=False, name=None))
+    
+    # For smaller strings, use a faster direct approach
+    result = set()
+    for line in csv_string.split('\n'):
+        if not line.strip():
+            continue
+        parts = line.split(',')
+        if len(parts) >= 3:  # Ensure we have at least 3 parts: index, role, filler
+            role = parts[1].strip()
+            filler = ','.join(parts[2:]).strip()  # Rejoin if there were commas in the filler
+            result.add((role, filler or 'nan'))
+    
+    return result
+
+
+def find_timepoint_in_alignments(annotation, max_depth=5, current_depth=0):
+    """
+    Recursively search for a TimePoint annotation in the alignment chain.
+    
+    :param annotation: The annotation to start the search from
+    :param max_depth: Maximum recursion depth to prevent infinite loops
+    :param current_depth: Current recursion depth
+    :return: TimePoint annotation if found, None otherwise
+    """
+    if current_depth >= max_depth:
+        logging.debug(f"Max recursion depth reached for annotation {annotation.id}")
+        return None
+    
+    logging.debug(f"Checking annotation {annotation.id} (type: {annotation.at_type}) at depth {current_depth}")
+    
+    # Check if this annotation is a TimePoint
+    if annotation.at_type == AnnotationTypes.TimePoint:
+        logging.debug(f"Found TimePoint directly: {annotation.id}")
+        return annotation
+    
+    # Get all aligned annotations
+    # print (annotation)
+    # print ("!!!")
+    # we need to iterate over the aligned annotations twice
+    aligned_anns = list(annotation.get_all_aligned()) 
+    logging.debug(f"Found {len(list(aligned_anns))} aligned annotations for {annotation.id}")
+    
+    # First, check for any direct TimePoints
+    for ann in aligned_anns:
+        if ann.at_type == AnnotationTypes.TimePoint:
+            logging.debug(f"Found direct TimePoint {ann.id} aligned to {annotation.id}")
+            return ann
+    
+    # If no TimePoints found, recursively check aligned annotations
+    for ann in aligned_anns:
+        logging.debug(f"Recursively checking {ann.id} (type: {ann.at_type})")
+        timepoint = find_timepoint_in_alignments(ann, max_depth, current_depth + 1)
+        if timepoint:
+            logging.debug(f"Found TimePoint {timepoint.id} via {ann.id}")
+            return timepoint
+    
+    logging.debug(f"No TimePoint found for {annotation.id} at depth {current_depth}")
+    return None
 
 
 def load_pred(file: Union[str, os.PathLike]) -> Dict[str, Dict]:
@@ -97,19 +114,50 @@ def load_pred(file: Union[str, os.PathLike]) -> Dict[str, Dict]:
     """
     guid = guidhandler.get_aapb_guid_from(file)
     logging.debug("Loading prediction data for %s...", guid)
-
-    with open(file, encoding='utf-8') as f:
-        rfb_mmif = Mmif(json.load(f))
-    f.close()
-    rfb_view = rfb_mmif.views.get_last_contentful_view()
-
-    frames_dict = {}
-    for rfb_td in rfb_view.get_documents():
-        aligned_tp = get_aligned_ann_of(rfb_mmif, rfb_td, RFB_APP, SWT_APP)
-        aligned_frame = vdh.convert_timepoint(rfb_mmif, aligned_tp, 'frames')
-        frames_dict[aligned_frame] = csv_string_to_pair(rfb_td.text_value)
-
-    return {guid: frames_dict}
+    
+    try:
+        # Load MMIF file
+        t_start = time.time()
+        with open(file, encoding='utf-8') as f:
+            mmif_json = json.load(f)
+        logging.debug(f"File loading time: {time.time() - t_start:.4f} seconds")
+        
+        # Parse MMIF
+        t_start = time.time()
+        rfb_mmif = Mmif(mmif_json)
+        logging.debug(f"MMIF parsing time: {time.time() - t_start:.4f} seconds")
+        
+        # Get RFB view
+        t_start = time.time()
+        rfb_view = rfb_mmif.views.get_last_contentful_view()
+        logging.debug(f"View retrieval time: {time.time() - t_start:.4f} seconds")
+        
+        # Process documents
+        t_start = time.time()
+        frames_dict = {}
+        
+        total_docs = 0
+        docs_with_timepoints = 0
+        
+        for rfb_td in rfb_view.get_documents():
+            total_docs += 1
+            # Find TimePoint in the document's alignment chain
+            timepoint = find_timepoint_in_alignments(rfb_td)
+            
+            # Convert timepoint to frame if found
+            if timepoint:
+                docs_with_timepoints += 1
+                aligned_frame = vdh.convert_timepoint(rfb_mmif, timepoint, 'frames')
+                frames_dict[aligned_frame] = csv_string_to_pair(rfb_td.text_value)
+        
+        logging.debug(f"Document processing time: {time.time() - t_start:.4f} seconds")
+        percentage = 0 if total_docs == 0 else (docs_with_timepoints/total_docs*100)
+        logging.info(f"Processed {total_docs} documents, found timepoints for {docs_with_timepoints} documents ({percentage:.1f}%)")
+        
+        return {guid: frames_dict}
+    except Exception as e:
+        logging.error(f"Error loading file {file}: {e}")
+        return {guid: {}}
 
 # --------------------------------------------------------------------
 # Functions needed to load gold standard data
@@ -125,8 +173,12 @@ def csv_string_to_set(csv_string: str) -> Set[Tuple[str, str]]:
     """
     rf_set = set()
     for pair in csv_string.split('\n'):
-        _, role, filler = pair.split(',', maxsplit=2)
-        rf_set.add((role, filler))
+        try:
+            _, role, filler = pair.split(',', maxsplit=2)
+            rf_set.add((role, filler))
+        except ValueError as e:
+            logging.error(f"Error parsing CSV line: {e}")
+    
     return rf_set
 
 
@@ -142,17 +194,20 @@ def load_gold(gold_csv: Union[str, os.PathLike]) -> Dict[str, Dict]:
     guid = guidhandler.get_aapb_guid_from(gold_csv)
     logging.debug("Loading gold-standard data for %s...", guid)
     frames_dict = defaultdict(set)
+    
     df = pd.read_csv(gold_csv).dropna(subset=['ANNOTATIONS'])
     # FIXME: Empty annotations are dropped from this process
-
+    
     min_frame, max_frame = -1, -1
     anns = set()
     for _, frame in df.iterrows():
         if not frame['SKIPPED']:
             if anns:
                 frames_dict[(min_frame, max_frame)] = anns
+            
             anns = csv_string_to_set(frame['ANNOTATIONS'])
             min_frame = frame['FRAME']
+            max_frame = min_frame  # Initialize max to min
         else:
             if frame['ANNOTATIONS'] == 'DUPLICATE':
                 max_frame = frame['FRAME']
@@ -160,7 +215,12 @@ def load_gold(gold_csv: Union[str, os.PathLike]) -> Dict[str, Dict]:
                 if anns:
                     frames_dict[(min_frame, max_frame)] = anns
                     anns = set()
-
+                    min_frame = max_frame = -1
+    
+    # Add the last span if it exists
+    if anns and min_frame != -1 and max_frame != -1:
+        frames_dict[(min_frame, max_frame)] = anns
+    
     return {guid: frames_dict}
 
 # --------------------------------------------------------------------
@@ -191,12 +251,16 @@ class RFBMetrics(ABC):
                               ) -> Dict[int, Tuple[int, int]]:
         """Help aligning frames from predictions with span from golds"""
         alignments = defaultdict(tuple)
+        
         for frame in pred[self.guid]:
             for span in gold[self.guid]:
                 if span[0] <= frame <= span[1]:
                     alignments[frame] = span
                     break
-
+        
+        if not alignments:
+            logging.warning(f"No frames were aligned for {self.guid}")
+            
         return alignments
 
     @abstractmethod
@@ -250,10 +314,12 @@ class IOU(RFBMetrics):
     def _fuzzy_match(self, gold_list: StringList, pred_list: StringList) -> List[int]:
         match_matrix = gold_list @ pred_list
         max_indices = np.argmax(match_matrix, axis=0)
+        
         valid_indices = [row
                          for col, row in enumerate(max_indices)
                          if match_matrix[row, col] == 100
                          ]
+        
         return valid_indices
 
     def _intersect_between_binding(self, gold: Dict, pred: Dict) -> int:
@@ -263,13 +329,15 @@ class IOU(RFBMetrics):
         # Fuzzy match the roles in pred with the roles in gold
         gold_array = StringList(list(gold_roles.values()))
         pred_array = StringList(list(pred.keys()))
+        
         matched_roles = [gold_roles[idx] for idx in self._fuzzy_match(gold_array, pred_array)]
 
         # Fuzzy match the fillers between gold and pred sharing the same role
         num_intersect = 0
         for role in matched_roles:
             gold_fillers, pred_fillers = StringList(gold[role]), StringList(pred[role])
-            num_intersect += len(self._fuzzy_match(gold_fillers, pred_fillers))
+            matched_fillers = self._fuzzy_match(gold_fillers, pred_fillers)
+            num_intersect += len(matched_fillers)
 
         return num_intersect
 
@@ -299,103 +367,268 @@ class IOU(RFBMetrics):
 # Run evaluation in parallel
 # --------------------------------------------------------------------
 
+def _load_file(args):
+    """Helper function to load a single file for parallel processing"""
+    file_path, label = args
+    start_time = time.time()
+    result = None
+    if label == 'gold':
+        result = load_gold(file_path)
+    else:
+        result = load_pred(file_path)
+    elapsed = time.time() - start_time
+    logging.debug(f"Loaded {label} file {file_path} in {elapsed:.2f} seconds")
+    return result
 
-def _load_data_from_dir(directory: Union[str, os.PathLike],
-                        label: str
-                        ) -> Dict[str, Dict]:
+# Define process-safe evaluation function moved outside for pickling
+def process_video(guid_data):
+    """Process a single video for evaluation
+    
+    :param guid_data: A tuple of (guid, gold_data, pred_data)
+    :return: Dictionary with evaluation results
     """
-    Load data from a directory
+    guid, gold_data, pred_data = guid_data
+    try:
+        logging.info(f"Evaluating {guid}...")
+        iou = IOU({guid: gold_data}, {guid: pred_data})
+        return {guid: iou.calculate()}
+    except Exception as e:
+        logging.error(f"Error evaluating {guid}: {e}")
+        return {guid: {-1: (-1, -1, -1)}}
 
-    :param: dir: the directory path of data
-    :param: label: the label of either gold or prediction data
+def _load_data_from_dir_parallel(directory: Union[str, os.PathLike],
+                                label: str,
+                                num_processes: int = 4) -> Dict[str, Dict]:
+    """
+    Load data from a directory using parallel processing
+    
+    :param directory: the directory path of data
+    :param label: the label of either gold or prediction data
+    :param num_processes: number of processes to use
     :return: a dictionary whose key is a GUID and value is a dictionary of frame data
     """
-    logging.debug("Start loading %s data:", label)
-    out = {}
+    logging.info(f"Loading {label} data from {directory} in parallel...")
+    
+    # Get list of all files in directory
+    file_paths = []
     for root, _, files in os.walk(directory):
         for file in files:
+            file_paths.append((os.path.join(root, file), label))
+    
+    # Use exactly 4 processes as requested
+    num_processes = min(4, len(file_paths))
+    
+    logging.info(f"Loading {len(file_paths)} {label} files using {num_processes} processes")
+    
+    # Use a pool to process files in parallel
+    out = {}
+    with mp.Pool(num_processes) as pool:
+        results = pool.map(_load_file, file_paths)
+        
+        # Combine results
+        for result in results:
+            if result:  # Skip empty results
+                out.update(result)
+    
+    logging.info(f"Loaded {len(out)} {label} videos")
+    return out
+
+def _load_data_from_dir(directory: Union[str, os.PathLike],
+                        label: str) -> Dict[str, Dict]:
+    """
+    Load data from a directory (sequential version)
+
+    :param directory: the directory path of data
+    :param label: the label of either gold or prediction data
+    :return: a dictionary whose key is a GUID and value is a dictionary of frame data
+    """
+    logging.info(f"Loading {label} data from {directory}...")
+    out = {}
+    file_count = 0
+    
+    for root, _, files in os.walk(directory):
+        for file in files:
+            file_path = os.path.join(root, file)
+            file_count += 1
+            
             if label == 'gold':
-                out.update(load_gold(os.path.join(root, file)))
+                try:
+                    result = load_gold(file_path)
+                    out.update(result)
+                except Exception as e:
+                    logging.error(f"Error loading gold file {file_path}: {e}")
             else:
-                out.update(load_pred(os.path.join(root, file)))
+                try:
+                    result = load_pred(file_path)
+                    out.update(result)
+                except Exception as e:
+                    logging.error(f"Error loading prediction file {file_path}: {e}")
+    
+    logging.info(f"Loaded {len(out)} {label} videos from {file_count} files")
     return out
 
 
-def run_in_sequence(gold_dir: Union[str, os.PathLike],
-                    pred_dir: Union[str, os.PathLike]
-                    ) -> List[Dict[str, Dict[int, Tuple]]]:
-    """
-    Run evaluation in serial/sequence
-
-    :param: gold_dir: the directory path of gold standard data
-    :param: pred_dir: the directory path of prediction data
-    :return: a dictionary of evaluation results with its key as GUID
-    """
-    results = []
-    golds, preds = _load_data_from_dir(gold_dir, 'gold'), _load_data_from_dir(pred_dir, 'pred')
-    overlap_videos = list(golds.keys() & preds.keys())
-    logging.debug("\nOverlap videos %s found", len(overlap_videos))
-
-    if overlap_videos:
-        for video in overlap_videos:
-            iou = IOU({video: golds[video]}, {video: preds[video]})
-            results.append({video: iou.calculate()})
-    return results
-
-
-def run_in_parallel(gold_dir: Union[str, os.PathLike],
-                    pred_dir: Union[str, os.PathLike]
-                    ) -> List[Dict[str, Dict[int, Tuple]]]:
-    """
-    Run evaluation in parallel
-
-    :param: gold_dir: the directory path of gold standard data
-    :param: pred_dir: the directory path of prediction data
-    :return: a dictionary of evaluation results
-    """
-    def help_run_iou(args):
-        g, p = args
-        iou = IOU(g, p)
-        return iou.calculate()
-
-    golds, preds = _load_data_from_dir(gold_dir, 'gold'), _load_data_from_dir(pred_dir, 'pred')
-    overlap_videos = list(golds.keys() & preds.keys())
-    logging.debug("\nOverlap videos %s found", len(overlap_videos))
-
-    results = []
-    if overlap_videos:
-        num_cores = mp.cpu_count()
-        num_processes = max(1, num_cores // 2)  # Use half of the available cores at maximum
-        logging.debug("Number of processes: %s deployed", num_processes)
-
-        with mp.Pool(num_processes) as pool:
-            chunk_size = len(overlap_videos) // num_processes
-            for i in range(0, len(overlap_videos), chunk_size):
-                chunk = [({guid: golds[guid]}, {guid: preds[guid]})
-                         for guid in overlap_videos[i:i+chunk_size]
-                         ]
-                results.extend(pool.map(help_run_iou, chunk))
-    logging.warning("No overlap videos found")
-    return results
-
-# --------------------------------------------------------------------
-# Write out evaluation results
-# --------------------------------------------------------------------
-
-
-def write_out(results: List[Dict[str, Dict[int, Tuple]]]) -> None:
-    """Write out a list of formatted evaluation results into a .txt
-
-    :param: results: the list of formatted evaluation results
+def write_out(results: List[Dict[str, Dict[int, Tuple]]],
+              output_dir: Union[str, os.PathLike] = None,
+              pred_dir_name: str = None) -> None:
+    """Write out evaluation results to disk
+    
+    :param results: List of evaluation results
+    :param output_dir: Directory to write results to
+    :param pred_dir_name: Name of the predictions directory to use in output directory name
     :return: None
     """
-    with open('results.txt', 'w', encoding='utf-8') as f:
+    # Extract app name and dataset from prediction directory name
+    if pred_dir_name is None:
+        pred_dir_name = "preds@default@default"
+    
+    # Strip trailing slashes and get directory name
+    pred_dir_clean = pred_dir_name.rstrip('/')
+    dir_name_only = os.path.basename(pred_dir_clean) or pred_dir_clean.split('/')[-1]
+    
+    # Debug info
+    logging.debug(f"Prediction directory: {pred_dir_name}")
+    logging.debug(f"Extracted directory name: {dir_name_only}")
+    
+    # Parse directory name to extract app and dataset info
+    if '@' in dir_name_only:
+        parts = dir_name_only.split('@')
+        app_name = parts[1] if len(parts) > 1 else "default"
+        dataset = parts[2] if len(parts) > 2 else "default"
+    else:
+        app_name = dir_name_only or "default"
+        dataset = "default"
+    
+    # Build output filenames
+    results_dir_name = f"results@{app_name}@{dataset}"
+    report_name = f"report@{app_name}@{dataset}.md"
+    
+    logging.info(f"Creating results in directory: {results_dir_name}")
+    results_dir = os.path.join(output_dir if output_dir else os.getcwd(), results_dir_name)
+    
+    if not os.path.exists(results_dir):
+        os.makedirs(results_dir)
+    
+    # Calculate overall metrics for summary
+    overall_metrics = {
+        'role_iou': [],
+        'filler_iou': [],
+        'binding_iou': []
+    }
+    
+    valid_guids = []
+    
+    # Process and write individual results files
+    for result in results:
+        for guid, frame_scores in result.items():
+            # Skip entries with no frames
+            if list(frame_scores.keys()) == [-1]:
+                continue
+                
+            valid_guids.append(guid)
+            
+            # Calculate metrics for this guid
+            role_ious, filler_ious, binding_ious = [], [], []
+            json_data = {'frame_scores': {}, 'mean_scores': {}}
+            
+            # Process individual frame scores
+            for frame, (role_iou, filler_iou, binding_iou) in frame_scores.items():
+                json_data['frame_scores'][str(frame)] = {
+                    'role_iou': role_iou,
+                    'filler_iou': filler_iou,
+                    'binding_iou': binding_iou
+                }
+                role_ious.append(role_iou)
+                filler_ious.append(filler_iou)
+                binding_ious.append(binding_iou)
+            
+            # Calculate and store mean scores
+            json_data['mean_scores'] = {
+                'role_iou': round(sum(role_ious) / len(role_ious), 3) if role_ious else 0,
+                'filler_iou': round(sum(filler_ious) / len(filler_ious), 3) if filler_ious else 0,
+                'binding_iou': round(sum(binding_ious) / len(binding_ious), 3) if binding_ious else 0
+            }
+            
+            # Add to overall metrics
+            for metric in overall_metrics:
+                overall_metrics[metric].append(json_data['mean_scores'][metric])
+            
+            # Write individual JSON file
+            with open(os.path.join(results_dir, f"{guid}.json"), 'w', encoding='utf-8') as f:
+                json.dump(json_data, f, indent=2)
+    
+    # Calculate overall mean scores
+    overall_means = {}
+    for metric, values in overall_metrics.items():
+        overall_means[metric] = round(sum(values) / len(values), 3) if values else 0
+    
+    # Write results.txt summary
+    results_txt_path = os.path.join(results_dir, 'results.txt')
+    with open(results_txt_path, 'w', encoding='utf-8') as f:
+        # Individual results
         for result in results:
             for guid, frame_scores in result.items():
-                f.write(f"{guid}:\n")
-                for frame, scores in frame_scores.items():
-                    f.write(f"\t\t{frame}: Role={scores[0]}\tFiller={scores[1]}\tBinding={scores[2]}\n")
-    f.close()
+                if list(frame_scores.keys()) == [-1]:
+                    continue
+                
+                # Calculate mean scores for this guid
+                role_ious = [score[0] for score in frame_scores.values()]
+                filler_ious = [score[1] for score in frame_scores.values()]
+                binding_ious = [score[2] for score in frame_scores.values()]
+                
+                mean_role_iou = round(sum(role_ious) / len(role_ious), 3) if role_ious else 0
+                mean_filler_iou = round(sum(filler_ious) / len(filler_ious), 3) if filler_ious else 0
+                mean_binding_iou = round(sum(binding_ious) / len(binding_ious), 3) if binding_ious else 0
+                
+                f.write(f"{guid}:\tRole IOU={mean_role_iou}\tFiller IOU={mean_filler_iou}\tBinding IOU={mean_binding_iou}\n")
+        
+        # Overall mean scores
+        f.write("\n")
+        f.write(f"Overall Mean Role IOU: {overall_means['role_iou']}\n")
+        f.write(f"Overall Mean Filler IOU: {overall_means['filler_iou']}\n")
+        f.write(f"Overall Mean Binding IOU: {overall_means['binding_iou']}\n")
+    
+    # Create markdown report
+    report_path = os.path.join(output_dir if output_dir else os.getcwd(), report_name)
+    with open(report_path, 'w', encoding='utf-8') as f:
+        # Report header
+        f.write(f"# Evaluation Report for {app_name}" + (f" on {dataset}" if dataset != "default" else "") + "\n\n")
+        
+        # Summary section
+        f.write("## Summary\n\n")
+        f.write(f"Total videos evaluated: {len(valid_guids)}\n\n")
+        
+        # Overall metrics table
+        f.write("### Overall Metrics\n\n")
+        f.write("| Metric | Value |\n")
+        f.write("|--------|-------|\n")
+        f.write(f"| Role IOU | {overall_means['role_iou']} |\n")
+        f.write(f"| Filler IOU | {overall_means['filler_iou']} |\n")
+        f.write(f"| Binding IOU | {overall_means['binding_iou']} |\n\n")
+        
+        # Individual video metrics table
+        f.write("### Individual Video Metrics\n\n")
+        f.write("| GUID | Role IOU | Filler IOU | Binding IOU |\n")
+        f.write("|------|----------|------------|-------------|\n")
+        
+        for result in results:
+            for guid, frame_scores in result.items():
+                if list(frame_scores.keys()) == [-1]:
+                    continue
+                
+                # Calculate mean scores for this guid
+                role_ious = [score[0] for score in frame_scores.values()]
+                filler_ious = [score[1] for score in frame_scores.values()]
+                binding_ious = [score[2] for score in frame_scores.values()]
+                
+                mean_role_iou = round(sum(role_ious) / len(role_ious), 3) if role_ious else 0
+                mean_filler_iou = round(sum(filler_ious) / len(filler_ious), 3) if filler_ious else 0
+                mean_binding_iou = round(sum(binding_ious) / len(binding_ious), 3) if binding_ious else 0
+                
+                f.write(f"| {guid} | {mean_role_iou} | {mean_filler_iou} | {mean_binding_iou} |\n")
+    
+    logging.info(f"Results written to {results_dir}")
+    logging.info(f"Report written to {report_path}")
 
 
 # --------------------------------------------------------------------
@@ -414,7 +647,7 @@ def parse_args() -> Namespace:
         '-p',
         '--preds',
         help='The directory path of RFB predictions',
-        required=True
+        required=False
     )
 
     parser.add_argument(
@@ -428,24 +661,94 @@ def parse_args() -> Namespace:
         action='store_true',
         help='Run evaluation in sequence'
     )
+    
+    parser.add_argument(
+        '-o',
+        '--output-dir',
+        help='Directory to store results',
+        default=None
+    )
 
     return parser.parse_args()
 
 
 # --------------------------------------------------------------------
-# Main
+# Debug functions
 # --------------------------------------------------------------------
+
+def debug_single_pair(gold_dir: Union[str, os.PathLike], pred_dir: Union[str, os.PathLike], output_dir: Union[str, os.PathLike] = None) -> None:
+    """
+    Debug function to compare a single gold to its matching prediction file
+    
+    :param gold_dir: Directory containing gold standard files
+    :param pred_dir: Directory containing prediction files
+    :param output_dir: Directory to write output results
+    """
+    golds = _load_data_from_dir(gold_dir, 'gold')
+    preds = _load_data_from_dir(pred_dir, 'pred')
+    
+    overlap_videos = list(golds.keys() & preds.keys())
+    print(f"Found {len(overlap_videos)} overlapping videos: {overlap_videos}")
+    
+    if not overlap_videos:
+        print("No matching gold-prediction pairs found!")
+        return
+    
+    # Choose the first matching pair for debugging
+    guid = overlap_videos[0]
+    print(f"\n\nDEBUGGING SINGLE PAIR: {guid}")
+    
+    # Log gold data
+    gold_data = golds[guid]
+    print(f"\nGOLD DATA for {guid}:")
+    for span, annotations in gold_data.items():
+        print(f"  Frame span {span} has {len(annotations)} annotations:")
+        for role, filler in annotations:
+            print(f"    Role: '{role}', Filler: '{filler}'")
+    
+    # Log prediction data
+    pred_data = preds[guid]
+    print(f"\nPREDICTION DATA for {guid}:")
+    for frame, annotations in pred_data.items():
+        print(f"  Frame {frame} has {len(annotations)} annotations:")
+        for role, filler in annotations:
+            print(f"    Role: '{role}', Filler: '{filler}'")
+    
+    # Create IOU calculator and check frame alignment
+    iou = IOU({guid: gold_data}, {guid: pred_data})
+    print(f"\nFRAME ALIGNMENT:")
+    for pred_frame, gold_span in iou.frames.items():
+        print(f"  Prediction frame {pred_frame} aligns with gold span {gold_span}")
+    
+    # Calculate IOU for this pair
+    scores = iou.calculate()
+    print(f"\nIOU SCORES:")
+    for frame, (role_iou, filler_iou, binding_iou) in scores.items():
+        print(f"  Frame {frame}: Role IOU={role_iou}, Filler IOU={filler_iou}, Binding IOU={binding_iou}")
+    
+    # Write the results to disk
+    if output_dir:
+        write_out([{guid: scores}], output_dir)
+        print(f"\nResults written to {output_dir}/{guid}.json")
+        print(f"Summary results written to {output_dir}/results.txt")
 
 
 def main():
     """Main function for running the evaluation task for the RFB app
     """
     args = parse_args()
-    preds_dir, debug, run_in_seq = args.preds, args.debug, args.in_seq
+    
+    # Configure logging
+    logging_level = logging.DEBUG if args.debug else logging.INFO
+    logging.basicConfig(level=logging_level, format='%(levelname)s: %(message)s')
+    
+    # Ensure predictions directory is provided
+    if not args.preds:
+        logging.error("Predictions directory is required")
+        return
 
-    if debug:
-        logger = logging.getLogger()
-        logger.setLevel(logging.DEBUG)
+    # Record total time
+    total_start_time = time.time()
 
     try:
         golds_dir = goldretriever.download_golds(GOLD_URL)
@@ -453,13 +756,98 @@ def main():
         logging.error("The gold standard data is not found")
         return
 
-    if run_in_seq:
-        logging.debug("Run evaluation in sequence")
-        results = run_in_sequence(golds_dir, preds_dir)
+    # Debug mode: compare a single gold-prediction pair
+    if args.debug:
+        logging.info("Running in debug mode - comparing a single gold-prediction pair")
+        debug_single_pair(golds_dir, args.preds, args.output_dir)
+        return
+
+    # Run evaluation (sequential or parallel)
+    is_parallel = not args.in_seq
+    mode = "sequential" if args.in_seq else "parallel"
+    logging.info(f"Running evaluation in {mode} mode")
+    
+    # Call run_evaluation directly without wrapper functions
+    results, pred_dir_name = run_evaluation(
+        golds_dir, 
+        args.preds,
+        parallel=is_parallel, 
+        num_processes=4 if is_parallel else 1
+    )
+    
+    # Write results
+    write_out(results, args.output_dir, pred_dir_name)
+    
+    # Report total time
+    total_time = time.time() - total_start_time
+    logging.info(f"Total execution time: {total_time:.2f} seconds")
+
+
+def run_evaluation(gold_dir: Union[str, os.PathLike],
+                  pred_dir: Union[str, os.PathLike],
+                  parallel: bool = True,
+                  num_processes: int = 4) -> Tuple[List[Dict[str, Dict[int, Tuple]]], str]:
+    """
+    Run evaluation either in parallel or sequential mode
+    
+    :param gold_dir: Directory containing gold standard data
+    :param pred_dir: Directory containing prediction data
+    :param parallel: Whether to use parallel processing
+    :param num_processes: Number of processes to use in parallel mode
+    :return: Tuple of (results, prediction directory name)
+    """
+    mode = "parallel" if parallel else "sequential"
+    logging.info(f"Starting evaluation in {mode} mode...")
+    
+    # Load gold data sequentially (always)
+    start_time = time.time()
+    golds = _load_data_from_dir(gold_dir, 'gold')
+    gold_loading_time = time.time() - start_time
+    logging.info(f"Gold data loading completed in {gold_loading_time:.2f} seconds")
+    
+    # Load prediction data (either in parallel or sequentially)
+    start_time = time.time()
+    if parallel:
+        logging.info(f"Using {num_processes} processes for parallel evaluation")
+        preds = _load_data_from_dir_parallel(pred_dir, 'pred', num_processes)
     else:
-        logging.debug("Run evaluation in parallel")
-        results = run_in_parallel(golds_dir, preds_dir)
-    write_out(results)
+        preds = _load_data_from_dir(pred_dir, 'pred')
+    pred_loading_time = time.time() - start_time
+    logging.info(f"{mode.capitalize()} prediction data loading completed in {pred_loading_time:.2f} seconds")
+    
+    total_loading_time = gold_loading_time + pred_loading_time
+    logging.info(f"Total data loading completed in {total_loading_time:.2f} seconds")
+    
+    # Find overlapping videos
+    overlap_videos = list(golds.keys() & preds.keys())
+    logging.info(f"Found {len(overlap_videos)} overlapping videos")
+    
+    if not overlap_videos:
+        logging.warning("No overlap videos found between gold and prediction data")
+        return [], pred_dir
+    
+    # Evaluate videos (parallel or sequential)
+    start_time = time.time()
+    results = []
+    
+    if parallel:
+        # Prepare data for parallel processing
+        process_data = [(guid, golds[guid], preds[guid]) for guid in overlap_videos]
+        
+        # Run in parallel
+        with mp.Pool(num_processes) as pool:
+            results = pool.map(process_video, process_data)
+    else:
+        # Sequential evaluation
+        for video in overlap_videos:
+            logging.info(f"Evaluating {video}...")
+            iou = IOU({video: golds[video]}, {video: preds[video]})
+            results.append({video: iou.calculate()})
+    
+    eval_time = time.time() - start_time
+    logging.info(f"Evaluation completed in {eval_time:.2f} seconds")
+    
+    return results, pred_dir
 
 
 if __name__ == "__main__":
