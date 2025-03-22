@@ -2,8 +2,8 @@
 Hello, it seems you are trying to create new evaluation code for a CLAMS app. 
 To do so: 
 ```bash
-# make the current /aapb_eval_module dir your current working directory. 
-cd aapb_eval_module
+# make the current /common dir your current working directory. 
+cd common
 # run the project directory generator
 # the code will ask you to name the directory. Name it something ending with "_eval". e.g. "your_new_app_eval".
 python generate_new_eval_dir.py
@@ -38,7 +38,7 @@ eval tasks. However, future discussion could likely change how this calling shou
 One discussed change is to have the run command take in a parameter for which/where-the subdir/task code to use to evaluate. 
 
 ## Contents
-### In ./aapb_eval_module:  
+### In ./common:  
  - `__init__.py` - for modularization.
  - `begin_new_eval_readme.md` - START HERE, starting instructions for new developers of new task eval code. 
  - `eval_abc.py` - abstract base class template which can be used to template new task eval code. 
