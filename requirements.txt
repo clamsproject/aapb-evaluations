@@ -1,0 +1,5 @@
+clams-utils
+mmif-python 
+
+scikit-learn 
+jiwer
