@@ -3,6 +3,9 @@
 Evaluation of the alignment of the text to time positions for transcription/closed-captioning, commonly called "forced alignment".
 The `evaluate.py` processes human-annotated(`.tsv`) and machine-generated(`.mmif`) and outputs the evaluation results.
 
+## Important Note
+* Due to a [disparity issue](https://github.com/clamsproject/aapb-evaluations/issues/31) with the gold vs manual annotation (done via CADET), the evaluation script 
+
 ## Usage
 To run the evaluation code, run the following command while in the `fa_eval` directory:  
 ```bash
@@ -46,5 +49,3 @@ S-C-P-F1    0.966079
 dtype: float64
 ```
 
-## Important Notes / Common Issues
-* There is some [issue](https://github.com/clamsproject/aapb-evaluations/issues/31) with the gold vs silver/[non-gold text](aapb-collaboration-21-nongoldtext) in the fa_eval. 
