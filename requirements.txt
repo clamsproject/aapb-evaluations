@@ -3,3 +3,4 @@ mmif-python
 
 scikit-learn 
 jiwer
+pyannote.metrics
