@@ -14,6 +14,7 @@ included here via `metrics.py` modules.
 import argparse
 import bisect
 import datetime
+import inspect
 import io
 import json
 import logging
@@ -50,13 +51,14 @@ class ClamsAAPBEvaluationTask(ABC):
         name can be found in the aapb-annotations repository. (see 
         `batches` directory in the repository)
         """
-        self._taskname = Path(__file__).parent.name  # use the name of the directory as the name
+        self._taskname = 'NO-TASK' if self.__class__ == ClamsAAPBEvaluationTask else \
+            Path(inspect.getfile(self.__class__)).parent.name  # use the name of the directory as the name
         self.pairs = {}  # guid: [gold, pred] pairs
         if batchname is not None:
             self.set_guids_from_batchname(batchname)
         self.logger = logging.getLogger(self._taskname)
         self._results = None
-        self._calculations = None
+        self._calculations = {}
 
     @property
     def taskname(self) -> str:
@@ -173,7 +175,7 @@ class ClamsAAPBEvaluationTask(ABC):
             if not f.is_file():
                 continue
             guid = guidhandler.get_aapb_guid_from(f.name)
-            if guid in self.pairs:
+            if guid is not None and guid in self.pairs:
                 self.pairs[guid][1] = f
 
     @abstractmethod
@@ -195,14 +197,32 @@ class ClamsAAPBEvaluationTask(ABC):
         for guid in self.pairs:
             gold_f, pred_f = self.pairs[guid]
             gold = self._read_gold(gold_f)
-            pred = self._read_pred(pred_f, gold)
+            if pred_f is not None:
+                try:
+                    pred = self._read_pred(pred_f, gold)
+                except Exception as e:
+                    UserWarning(f"Error reading pred file {pred_f}: {e}")
+                    pred = None
+            else:
+                pred = None
             yield guid, gold, pred
 
     @abstractmethod
-    def _compare(self, guid: str, gold: Any, pred: Any) -> Any:
+    def _compare_pair(self, guid: str, gold: Any, pred: Any) -> Any:
         """
-        Main calculation of the evaluation metric(s).
-        guid string is passed for logging purposes.
+        Main calculation of the evaluation metric(s) for a pair of 
+        gold and pred instances, a.k.a. per-guid evaluation.
+        guid string is passed for logging purposes, and the returned value
+        will be stored under the guid key in the ``self._calculations``.
+        """
+        raise NotImplementedError
+    
+    @abstractmethod
+    def _compare_all(self, golds, preds) -> Any:
+        """
+        Main calculation of the evaluation metric(s) for the entire set of
+        gold and pred instances. The returned value will be stored under 
+        ``*`` key in the ``self._calculations``.
         """
         raise NotImplementedError
     
@@ -211,10 +231,12 @@ class ClamsAAPBEvaluationTask(ABC):
         Match and Compare the entries together. And add results to the results variable.
         """
         if by_guid:
-            results = {}
             for guid, gold, pred in self._read_data_pairs():
-                a_score = self._compare(guid, gold, pred)
-                results[guid] = a_score
+                if gold is None or pred is None:
+                    RuntimeWarning('fdsa')
+                    continue
+                a_score = self._compare_pair(guid, gold, pred)
+                self._calculations[guid] = a_score
         else:
             golds = []
             preds = []
@@ -222,8 +244,7 @@ class ClamsAAPBEvaluationTask(ABC):
                 golds.append(gold)
                 preds.append(pred)
             # passing asterisk to indicate that the comparison is for all guids
-            results = self._compare('*', golds, preds)
-        self._calculations = results
+            self._calculations['*'] = self._compare_all(golds, preds)
 
     @abstractmethod
     def finalize_results(self):
@@ -241,7 +262,7 @@ class ClamsAAPBEvaluationTask(ABC):
         self.finalize_results()
         report = io.StringIO()
         report.write(
-            f"# Evaluation Report for `{self.taskname}` task as of {datetime.datetime.now()}\n")  # TODO (krim @ 3/23/25): more human-readable date format
+            f"# Evaluation Report for `{self.taskname}` task as of {datetime.datetime.now()}\n")   
         report.write("## Raw Results\n")
         if isinstance(self.results, dict):
             report.write("```json\n")

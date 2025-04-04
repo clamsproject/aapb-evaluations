@@ -15,7 +15,7 @@ from pyannote.metrics.segmentation import SegmentationCoverage, SegmentationReca
 from common import ClamsAAPBEvaluationTask
 
 
-class ForcedAlignerEvaluator(ClamsAAPBEvaluationTask):
+class ForcedAlignmentEvaluator(ClamsAAPBEvaluationTask):
 
     @property
     def results(self) -> Union[dict, str]:
@@ -33,9 +33,9 @@ class ForcedAlignerEvaluator(ClamsAAPBEvaluationTask):
     def _read_gold(self, gold_file: Union[str, Path]) -> Any:
         gold_timeframes = Annotation()
         df = pd.read_csv(gold_file, sep='\t')
-        for index, row in df[['starts', 'ends', 'content']].iterrows():
-            segment = Segment(self.cadettime_to_ms(row['starts']) / 1000, self.cadettime_to_ms(row['ends']) / 1000)
-            gold_timeframes[segment] = row['content']
+        for index, row in df[['start', 'end', 'speech-transcript']].iterrows():
+            segment = Segment(self.cadettime_to_ms(row['start']) / 1000, self.cadettime_to_ms(row['end']) / 1000)
+            gold_timeframes[segment] = row['speech-transcript']
         return gold_timeframes
 
     def tokenize_cadet_silver_text(self, text):
@@ -150,7 +150,7 @@ class ForcedAlignerEvaluator(ClamsAAPBEvaluationTask):
             pred[Segment(start, end)] = ' '.join(ref_segment_text)
         return pred
 
-    def _compare(self, guid, reference: Any, hypothesis: Any) -> Any:
+    def _compare_pair(self, guid, reference: Any, hypothesis: Any) -> Any:
         """
         Compares a pair of reference (e.g, cadet annotation) and hypothesis
         annotations (from MMIF) and returns a list-like record of 
@@ -188,6 +188,9 @@ class ForcedAlignerEvaluator(ClamsAAPBEvaluationTask):
             return cpfprf
         except KeyError:
             print(f"Error: Issue with keys in results for file {guid}")
+            
+    def _compare_all(self, golds, preds) -> Any:
+        raise NotImplementedError("Comparing all golds and preds is not implemented. ")
 
     def finalize_results(self):
         """
@@ -210,13 +213,13 @@ class ForcedAlignerEvaluator(ClamsAAPBEvaluationTask):
 
 
 if __name__ == "__main__":
-    parser = ForcedAlignerEvaluator.prep_argparser()
+    parser = ForcedAlignmentEvaluator.prep_argparser()
     parser.add_argument('-t', '--thresholds',
                         help='comma-separated thresholds in seconds to count as "near-miss", use decimals ', type=str,
                         default="")
     args = parser.parse_args()
     
-    evaluator = ForcedAlignerEvaluator(args.batchname)
+    evaluator = ForcedAlignmentEvaluator(args.batchname)
     evaluator.thresholds = [] if not args.thresholds else [float(t) for t in args.thresholds.split(',')]
     evaluator.get_gold_files(args.golds)
     evaluator.get_pred_files(args.preds)
