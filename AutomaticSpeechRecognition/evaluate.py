@@ -1,16 +1,12 @@
-"""
-
-"""
-import tempfile
 from pathlib import Path
 from typing import Any, Union
 
 import pandas as pd
-from clams_utils.aapb import goldretriever, newshour_transcript_cleanup
-from jiwer import wer
+from clams_utils.aapb import newshour_transcript_cleanup
 from mmif import Mmif, DocumentTypes
 
 from common import ClamsAAPBEvaluationTask
+from common.metrics import wer
 
 # constant:
 ## note that this repository is a private one and the files are not available to the public (due to IP concerns)
@@ -19,7 +15,19 @@ GOLD_URL = "https://github.com/clamsproject/aapb-collaboration/tree/89b8b123abbd
 
 
 class AutomaticSpeechRecognitionEvaluator(ClamsAAPBEvaluationTask):
+    """
+    Evaluating Automatic Speech Recognition (ASR) results, using WER (Word 
+    Error Rate) metric. WER calculates the accuracy on the word level. To get 
+    a WER, the number of errors (added, deleted, incorrect words) is divided 
+    by the number of total words in reference transcript. In other words, WER 
+    tells "how wrong" the predicted result can be. That said, note that 
 
+    1. For WER, the lower the value, the better the performance.
+    1. WER can be more that 100%, although it sounds strange. 
+
+    More details can be found https://en.wikipedia.org/wiki/Word_error_rate . 
+    We use `jiwer` python library as the implementation of WER calculation.
+    """
     def _read_gold(self, gold_file: Union[str, Path]) -> Any:
         return newshour_transcript_cleanup.file_cleaner(str(gold_file))
 
@@ -43,8 +51,8 @@ class AutomaticSpeechRecognitionEvaluator(ClamsAAPBEvaluationTask):
         """
         returns WER scores one for cased and another for uncased (ignore case)
         """
-        cased_wer = wer(pred, gold)
-        uncased_wer = wer(pred.upper(), gold.upper())
+        cased_wer = wer(pred, gold, exact_case=True)
+        uncased_wer = wer(pred, gold, exact_case=False)
         return cased_wer, uncased_wer
     
     def _compare_all(self, golds, preds) -> Any:
@@ -54,7 +62,7 @@ class AutomaticSpeechRecognitionEvaluator(ClamsAAPBEvaluationTask):
         """
         raise NotImplementedError("Comparing all golds and preds is not implemented. ")
 
-    def finalize_results(self):
+    def _finalize_results(self):
         cols = 'GUID WER-cased WER-uncased'.split()
 
         df = pd.DataFrame(
@@ -67,13 +75,10 @@ class AutomaticSpeechRecognitionEvaluator(ClamsAAPBEvaluationTask):
 
 
 if __name__ == "__main__":
-    # get the absolute path of video-file-dir and hypothesis-file-dir
     parser = AutomaticSpeechRecognitionEvaluator.prep_argparser()
     args = parser.parse_args()
     
-    evaluator = AutomaticSpeechRecognitionEvaluator(args.batchname)
-    evaluator.get_gold_files(args.golds)
-    evaluator.get_pred_files(args.preds)
+    evaluator = AutomaticSpeechRecognitionEvaluator(args.batchname, args.golds, args.preds)
     evaluator.calculate_metrics(by_guid=True)
     report = evaluator.write_report()
     args.export.write(report.getvalue())

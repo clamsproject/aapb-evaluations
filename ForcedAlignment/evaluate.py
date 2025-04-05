@@ -16,6 +16,21 @@ from common import ClamsAAPBEvaluationTask
 
 
 class ForcedAlignmentEvaluator(ClamsAAPBEvaluationTask):
+    """
+    Evaluating Forced Alignment results using precision, recall, coverage, 
+    and purity metrics. The evaluation is done on the segment level, where
+    each segment is treated as a separate entity. The following metrics 
+    are used; 
+    
+    - Coverage: The percentage of the reference segments that are covered by
+         the hypothesis segments. Think of it as recall-like for interval data
+    - Purity: The percentage of the hypothesis segments that are covered by
+            the reference segments. Think of it as precision-like for interval data
+            
+    We use `pyannote.metrics` library for the implementation of these metrics, 
+    and hence more details can be found in `pyannote.metrics` documentation at 
+    https://pyannote.github.io/pyannote-metrics/reference.html#segmentation 
+    """
 
     @property
     def results(self) -> Union[dict, str]:
@@ -219,10 +234,8 @@ if __name__ == "__main__":
                         default="")
     args = parser.parse_args()
     
-    evaluator = ForcedAlignmentEvaluator(args.batchname)
-    evaluator.thresholds = [] if not args.thresholds else [float(t) for t in args.thresholds.split(',')]
-    evaluator.get_gold_files(args.golds)
-    evaluator.get_pred_files(args.preds)
+    evaluator = ForcedAlignmentEvaluator(batchname=args.batchname, gold_loc=args.golds, pred_loc=args.preds)
+    evaluator.thresholds = [] if 'thresholds' not in args or not args.thresholds else [float(t) for t in args.thresholds.split(',')]
     evaluator.calculate_metrics(by_guid=True)
     report = evaluator.write_report()
     args.export.write(report.getvalue())
