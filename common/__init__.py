@@ -14,6 +14,7 @@ included here via `metrics.py` modules.
 import argparse
 import bisect
 import datetime
+import inspect
 import io
 import json
 import logging
@@ -43,34 +44,43 @@ if 'LOCAL_AAPB_ANNOTATIONS' in os.environ:
 
 class ClamsAAPBEvaluationTask(ABC):
 
-    def __init__(self, batchname: str):
+    def __init__(self, batchname: str, gold_loc: Union[str, Path] = None, pred_loc: Union[str, Path] = None):
         """
         Initialize the evaluation task with a batch name. A "batch" is a 
         collection of AAPB GUIDs that are used for evaluation. The batch
         name can be found in the aapb-annotations repository. (see 
         `batches` directory in the repository)
         """
-        self._taskname = Path(__file__).parent.name  # use the name of the directory as the name
+        self._taskname = 'NO-TASK' if self.__class__ == ClamsAAPBEvaluationTask else \
+            Path(inspect.getfile(self.__class__)).parent.name  # use the name of the directory as the name
         self.pairs = {}  # guid: [gold, pred] pairs
         if batchname is not None:
-            self.set_guids_from_batchname(batchname)
+            self._set_guids_from_batchname(batchname)
         self.logger = logging.getLogger(self._taskname)
+        
+        # read data file paths
+        self._gold_loc = gold_loc
+        self._pred_loc = pred_loc
+        self._get_gold_files(gold_loc)
+        self._get_pred_files(pred_loc)
+
         self._results = None
-        self._calculations = None
+        self._calculations = {}
 
     @property
     def taskname(self) -> str:
         """
-        The name of the evaluation task.
+        The name of the evaluation task. Should be automatically set from 
+        the directory name, and stay read-only. 
         """
         return self._taskname
-
+    
     @property
     def results(self) -> Union[dict, str]:
         """
-        The results of the evaluation task. This could be a dictionary of 
-        metrics or a string of human-readable report for serialization 
-        into the report file.
+        The results of the evaluation task, after `calculate_metrics` is 
+        called. The value could be a dictionary of metrics or a string of 
+        human-readable report for serialization into the report file.
         """
         return self._results
     
@@ -78,7 +88,7 @@ class ClamsAAPBEvaluationTask(ABC):
     def results(self, value):
         self._results = value
 
-    def set_guids_from_batchname(self, batchname: str, aapb_ann_commit='main'):
+    def _set_guids_from_batchname(self, batchname: str, aapb_ann_commit='main'):
         """
         Set the list of GUIDs from a batch name, for convenience.
         Batch names are available in aapb-annotations repo. 
@@ -99,13 +109,13 @@ class ClamsAAPBEvaluationTask(ABC):
         for guid in guids:
             self.pairs[guid] = [None, None]
 
-    @staticmethod
-    def prep_argparser():
+    @classmethod
+    def prep_argparser(cls):
         """
         Prepares the argument parser for the evaluation task. The default
         arguments are defined in this super class. 
         """
-        parser = argparse.ArgumentParser()  # TODO (krim @ 3/23/25): auto-generate description from docstring when inheriting
+        parser = argparse.ArgumentParser(description=cls.__doc__)
         parser.add_argument('-p', '--preds', type=str, help='directory containing prediction files (MMIF)')
         parser.add_argument('-g', '--golds', type=str, help='directory containing gold files (non-MMIF)')
         parser.add_argument('-e', '--export', help='filename to export the results/report (default to stdout)',
@@ -116,7 +126,7 @@ class ClamsAAPBEvaluationTask(ABC):
                             default=None)
         return parser
 
-    def get_gold_files(self, gold_uri: str) -> Iterable[Union[str, Path]]:
+    def _get_gold_files(self, gold_uri: str) -> Iterable[Union[str, Path]]:
         """
         Read files under the gold "directory". If the directory location 
         is given as a URL (http, https, ftp, etc.), download the files 
@@ -152,11 +162,13 @@ class ClamsAAPBEvaluationTask(ABC):
     @abstractmethod
     def _read_gold(self, gold_file: Union[str, Path]) -> Any:
         """
-        Read the pred file and return the processed data. The data should be ready for comparing and calculating metrics.
+        Read the pred file and return the processed data. The data should 
+        be ready for comparing and calculating metrics by `_compareXXX` 
+        methods. 
         """
         raise NotImplementedError
 
-    def get_pred_files(self, pred_uri: str) -> Iterable[Union[str, Path]]:
+    def _get_pred_files(self, pred_uri: str) -> Iterable[Union[str, Path]]:
         """
         For now, the only way to pass pred files are through local directories.
         """
@@ -173,7 +185,7 @@ class ClamsAAPBEvaluationTask(ABC):
             if not f.is_file():
                 continue
             guid = guidhandler.get_aapb_guid_from(f.name)
-            if guid in self.pairs:
+            if guid is not None and guid in self.pairs:
                 self.pairs[guid][1] = f
 
     @abstractmethod
@@ -195,26 +207,47 @@ class ClamsAAPBEvaluationTask(ABC):
         for guid in self.pairs:
             gold_f, pred_f = self.pairs[guid]
             gold = self._read_gold(gold_f)
-            pred = self._read_pred(pred_f, gold)
+            if pred_f is not None:
+                try:
+                    pred = self._read_pred(pred_f, gold)
+                except Exception as e:
+                    UserWarning(f"Error reading pred file {pred_f}: {e}")
+                    pred = None
+            else:
+                pred = None
             yield guid, gold, pred
 
     @abstractmethod
-    def _compare(self, guid: str, gold: Any, pred: Any) -> Any:
+    def _compare_pair(self, guid: str, gold: Any, pred: Any) -> Any:
         """
-        Main calculation of the evaluation metric(s).
-        guid string is passed for logging purposes.
+        Main calculation of the evaluation metric(s) for a pair of 
+        gold and pred instances, a.k.a. per-guid evaluation.
+        guid string is passed for logging purposes, and the returned value
+        will be stored under the guid key in the ``self._calculations``.
+        """
+        raise NotImplementedError
+    
+    @abstractmethod
+    def _compare_all(self, golds, preds) -> Any:
+        """
+        Main calculation of the evaluation metric(s) for the entire set of
+        gold and pred instances. The returned value will be stored under 
+        ``*`` key in the ``self._calculations``.
         """
         raise NotImplementedError
     
     def calculate_metrics(self, by_guid: bool):
         """
-        Match and Compare the entries together. And add results to the results variable.
+        Match and Compare the entries together. And add results to the 
+        results attribute.
         """
         if by_guid:
-            results = {}
             for guid, gold, pred in self._read_data_pairs():
-                a_score = self._compare(guid, gold, pred)
-                results[guid] = a_score
+                if gold is None or pred is None:
+                    RuntimeWarning('fdsa')
+                    continue
+                a_score = self._compare_pair(guid, gold, pred)
+                self._calculations[guid] = a_score
         else:
             golds = []
             preds = []
@@ -222,14 +255,14 @@ class ClamsAAPBEvaluationTask(ABC):
                 golds.append(gold)
                 preds.append(pred)
             # passing asterisk to indicate that the comparison is for all guids
-            results = self._compare('*', golds, preds)
-        self._calculations = results
+            self._calculations['*'] = self._compare_all(golds, preds)
 
     @abstractmethod
-    def finalize_results(self):
+    def _finalize_results(self):
         """
-        If any aggregation or finalization is needed, do it here.
-        If no such step is needed, just `pass`.
+        If any aggregation or finalization is needed, do it here. If no 
+        such step is needed, just `pass`. Note that this method WILL 
+        always be called within report generation method.
         """
         raise NotImplementedError
 
@@ -238,11 +271,16 @@ class ClamsAAPBEvaluationTask(ABC):
         Create a report file using a markdown template. First section of 
         the report should be just a "dumps" of raw calculated results.
         """
-        self.finalize_results()
+        self._finalize_results()
         report = io.StringIO()
-        report.write(
-            f"# Evaluation Report for `{self.taskname}` task as of {datetime.datetime.now()}\n")  # TODO (krim @ 3/23/25): more human-readable date format
-        report.write("## Raw Results\n")
+        report.write(f"# Evaluation Report for `{self.taskname}` task as of {datetime.datetime.now()}\n")   
+        report.write(f"\n## Evaluation method\n{self.__doc__}\n")
+        report.write(f"\n## Data specs\n"
+                     f"- Groundtruth data location: {self._gold_loc}'\n"
+                     f"- System prediction (MMIF) location: {self._pred_loc}'\n")
+        report.write(f"\n## Pipeline specs\n")
+        # TODO (krim @ 4/4/25): parse mmif and get pipeline info
+        report.write(f"\n## Raw Results\n")
         if isinstance(self.results, dict):
             report.write("```json\n")
             json.dump(self.results, report, indent=2)
