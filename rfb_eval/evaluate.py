@@ -22,7 +22,9 @@ from clams_utils.aapb import guidhandler, goldretriever
 import pandas as pd
 import numpy as np
 
-GOLD_URL = 'https://github.com/clamsproject/aapb-annotations/tree/main/role-filler-binding/golds'
+# GOLD_URL = 'https://github.com/clamsproject/aapb-annotations/tree/main/role-filler-binding/golds'
+# GOLD_URL = 'https://github.com/clamsproject/aapb-annotations/tree/107-standard-field-names/role-filler-binding/golds'
+
 SWT_APP = 'http://apps.clams.ai/swt-detection/v6.1'
 RFB_APP = 'http://apps.clams.ai/role-filler-binder/v1.0'
 
@@ -125,12 +127,10 @@ def load_pred(file: Union[str, os.PathLike]) -> Dict[str, Dict]:
         # Parse MMIF
         t_start = time.time()
         rfb_mmif = Mmif(mmif_json)
-        logging.debug(f"MMIF parsing time: {time.time() - t_start:.4f} seconds")
         
         # Get RFB view
         t_start = time.time()
         rfb_view = rfb_mmif.views.get_last_contentful_view()
-        logging.debug(f"View retrieval time: {time.time() - t_start:.4f} seconds")
         
         # Process documents
         t_start = time.time()
@@ -139,15 +139,21 @@ def load_pred(file: Union[str, os.PathLike]) -> Dict[str, Dict]:
         total_docs = 0
         docs_with_timepoints = 0
         
+        print ("pre-loop")
         for rfb_td in rfb_view.get_documents():
             total_docs += 1
             # Find TimePoint in the document's alignment chain
             timepoint = find_timepoint_in_alignments(rfb_td)
-            
+            print ("post-find_timepoint_in_alignments")
             # Convert timepoint to frame if found
             if timepoint:
+                print ("post-timepoint")
                 docs_with_timepoints += 1
-                aligned_frame = vdh.convert_timepoint(rfb_mmif, timepoint, 'frames')
+                # Check if the timeUnit is already 'frame'
+                if timepoint.get_property('timeUnit') == 'frame':
+                    aligned_frame = timepoint.get_property('timePoint')
+                else:
+                    aligned_frame = vdh.convert_timepoint(rfb_mmif, timepoint, 'frames')
                 frames_dict[aligned_frame] = csv_string_to_pair(rfb_td.text_value)
         
         logging.debug(f"Document processing time: {time.time() - t_start:.4f} seconds")
@@ -164,21 +170,28 @@ def load_pred(file: Union[str, os.PathLike]) -> Dict[str, Dict]:
 # --------------------------------------------------------------------
 
 
-def csv_string_to_set(csv_string: str) -> Set[Tuple[str, str]]:
+def conll_string_to_set(conll_string: str) -> Set[Tuple[str, str]]:
     """
-    Convert csv-string to a set of tuples which represent (role, filler) pairs
+    Convert pipe-separated key=value string to a set of (key, value) tuples.
 
-    :params: csv_string: the input csv-formatted string
-    :return: a set of tuples of (role, filler)
+    :param conll_string: The input string, e.g., "role1=filler1|role2=filler2"
+    :return: A set of tuples, e.g., {("role1", "filler1"), ("role2", "filler2")}
     """
     rf_set = set()
-    for pair in csv_string.split('\n'):
-        try:
-            _, role, filler = pair.split(',', maxsplit=2)
-            rf_set.add((role, filler))
-        except ValueError as e:
-            logging.error(f"Error parsing CSV line: {e}")
-    
+    if not conll_string or pd.isna(conll_string): # Handle empty or NaN strings
+        return rf_set
+    pairs = conll_string.split('|')
+    for pair in pairs:
+        if '=' in pair:
+            try:
+                role, filler = pair.split('=', maxsplit=1)
+                # Add stripping to handle potential whitespace
+                rf_set.add((role.strip(), filler.strip()))
+            except ValueError:
+                # Handle cases where split might fail unexpectedly
+                logging.warning(f"Could not parse pair: '{pair}' in ANNOTATIONS string: '{conll_string}'")
+        elif pair.strip(): # Handle cases where a part might not have '=' like empty strings between ||
+             logging.warning(f"Skipping invalid pair (no '='): '{pair}' in ANNOTATIONS string: '{conll_string}'")
     return rf_set
 
 
@@ -186,41 +199,51 @@ def load_gold(gold_csv: Union[str, os.PathLike]) -> Dict[str, Dict]:
     """
     Load gold-standard csv data for RFB
 
-    As a review, its format looks like:
+    Its format looks like:
     GUID | FRAME | SWT-TYPE | SKIPPED | ANNOTATIONS
     -----------------------------------------------
-    str  | int   |   str    |  T/F    | csv-string
+    str  | int   |   str    |  T/F    | pipe-separated key=value string
     """
     guid = guidhandler.get_aapb_guid_from(gold_csv)
     logging.debug("Loading gold-standard data for %s...", guid)
-    frames_dict = defaultdict(set)
+    frames_dict = {}
     
-    df = pd.read_csv(gold_csv).dropna(subset=['ANNOTATIONS'])
-    # FIXME: Empty annotations are dropped from this process
+    try:
+        df = pd.read_csv(gold_csv)
+        # Keep rows with valid annotations
+        df = df.dropna(subset=['ANNOTATIONS'])
+        logging.debug(f"Loaded gold CSV with {len(df)} valid annotation rows")
+    except FileNotFoundError:
+        logging.error(f"Gold file not found: {gold_csv}")
+        return {guid: {}}
+    except Exception as e:
+        logging.error(f"Error reading gold CSV {gold_csv}: {e}")
+        return {guid: {}}
     
-    min_frame, max_frame = -1, -1
-    anns = set()
-    for _, frame in df.iterrows():
-        if not frame['SKIPPED']:
-            if anns:
-                frames_dict[(min_frame, max_frame)] = anns
+    if len(df) == 0:
+        logging.warning(f"No valid annotations found in {gold_csv}")
+        return {guid: {}}
+    
+    # Process each row as a separate frame annotation
+    for _, row in df.iterrows():
+        if pd.notna(row['ANNOTATIONS']) and row['ANNOTATIONS'] != 'DUPLICATE':
+            # Convert frame to int if possible, handling leading zeros
+            try:
+                frame = int(str(row['FRAME']).lstrip('0')) if pd.notna(row['FRAME']) else 0
+            except ValueError:
+                frame = 0
+                
+            # Create a frame span with just this frame
+            frame_span = (frame, frame)
             
-            anns = csv_string_to_set(frame['ANNOTATIONS'])
-            min_frame = frame['FRAME']
-            max_frame = min_frame  # Initialize max to min
-        else:
-            if frame['ANNOTATIONS'] == 'DUPLICATE':
-                max_frame = frame['FRAME']
-            else:
-                if anns:
-                    frames_dict[(min_frame, max_frame)] = anns
-                    anns = set()
-                    min_frame = max_frame = -1
+            # Parse annotations
+            annotations = conll_string_to_set(row['ANNOTATIONS'])
+            
+            if annotations:  # Only add if we have actual annotations
+                frames_dict[frame_span] = annotations
+                logging.debug(f"Added annotations for frame {frame}: {annotations}")
     
-    # Add the last span if it exists
-    if anns and min_frame != -1 and max_frame != -1:
-        frames_dict[(min_frame, max_frame)] = anns
-    
+    logging.info(f"Loaded {len(frames_dict)} frame entries for {guid}")
     return {guid: frames_dict}
 
 # --------------------------------------------------------------------
@@ -668,6 +691,13 @@ def parse_args() -> Namespace:
         help='Directory to store results',
         default=None
     )
+    
+    parser.add_argument(
+        '-g',
+        '--gold-dir',
+        help='Local directory containing gold standard files (instead of downloading)',
+        default=None
+    )
 
     return parser.parse_args()
 
@@ -750,10 +780,29 @@ def main():
     # Record total time
     total_start_time = time.time()
 
-    try:
-        golds_dir = goldretriever.download_golds(GOLD_URL)
-    except FileNotFoundError:
-        logging.error("The gold standard data is not found")
+    # Use local gold directory if specified, otherwise download
+    golds_dir = None
+    if args.gold_dir:
+        if args.gold_dir.startswith('http://') or args.gold_dir.startswith('https://'):
+            logging.info(f"Attempting to download golds from URL: {args.gold_dir}")
+            try:
+                golds_dir = goldretriever.download_golds(args.gold_dir)
+            except Exception as e: # Catch potential download errors
+                logging.error(f"Failed to download golds from {args.gold_dir}: {e}")
+                return
+        elif os.path.isdir(args.gold_dir):
+            golds_dir = args.gold_dir
+            logging.info(f"Using local gold directory: {golds_dir}")
+        else:
+            logging.error(f"Provided gold path is neither a valid URL nor an existing directory: {args.gold_dir}")
+            return
+    else:
+        logging.error("Gold standard location (-g or --gold-dir) is required (either a URL or a local directory path).")
+        return
+
+    # Ensure golds_dir was successfully set
+    if not golds_dir:
+        logging.error("Could not determine gold standard directory.")
         return
 
     # Debug mode: compare a single gold-prediction pair
