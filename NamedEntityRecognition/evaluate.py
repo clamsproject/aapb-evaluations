@@ -1,338 +1,218 @@
-import argparse
-import os
-import pathlib
-import re
+from pathlib import Path
+from typing import Any, Union
 
+from clams_utils.aapb import guidhandler
 from lapps.discriminators import Uri
 from mmif.serialize import Mmif
-from seqeval.metrics import classification_report
 
-from goldretriever import download_golds
+from common import ClamsAAPBEvaluationTask
+from common.metrics import classification_report
 
-label_dict = {'PERSON': 'person', 'ORG': 'organization', 'FAC': 'location', 'GPE': 'location', 'LOC': 'location',
-              'EVENT': 'event', 'PRODUCT': 'product', 'WORK_OF_ART': 'program/publication_title',
-              'program_title': 'program/publication_title', 'publication_title': 'program/publication_title'}
+"""
+Note that this evaluation script is using Brat `.ann` files as gold data, 
+but the ann files do not contain the full text. The URL below is the 
+location of the source text files used for ann annotation task. (source 
+text files are stored in a private repository, due to IP concerns)
+"""
+GOLD_ANNOTATION = 'https://github.com/clamsproject/aapb-annotations/tree/main/newshour-namedentity'
+SRC_UNDER_GOLDS = "https://github.com/clamsproject/aapb-collaboration/tree/89b8b123abbd4a9a67c525cc480173b52e0d05f0/21"
+
+# normalize the labels to be used in the evaluation
+label_dict = {'PERSON': 'person', 
+              'ORG': 'organization', 
+              'FAC': 'location', 
+              'GPE': 'location', 
+              'LOC': 'location',
+              'EVENT': 'event', 
+              'PRODUCT': 'product', 
+              'WORK_OF_ART': 'program/publication_title',
+              'program_title': 'program/publication_title', 
+              'publication_title': 'program/publication_title'}
 valid_labels = set(list(label_dict.keys()) + list(label_dict.values()))
 
 
-def entity_to_tokens(index, entity):
-    """this function return a list of tokens (with a BIO label associated with
-    each token) from an entity """
-
-    words = entity['text'].split()
-    start = entity['start']
-    tokens = []
-    label = entity['category']
-    if label not in valid_labels:  # e.g. QUANTITY
-        return tokens  # do not include in the final list of entities
-    if label in label_dict:
-        label = label_dict[label]  # e.g. ORG -> organization
-    for i, word in enumerate(words):
-        end = start + len(word)
-        if i == 0:
-            tokens.append(((index, start, end), 'B-' + label))
-        else:
-            tokens.append(((index, start, end), 'I-' + label))
-        start = end + 1
-    return tokens
-
-
-def file_to_tokens(index, filepath):
-    """this function check whether the file is in .ann or .mmif format, then
-    send it to the respective function to get the list of tokens """
-
-    if filepath.endswith('.ann'):
-        return ann_to_tokens(index, filepath)
-    else:  # mmif file, ends with .json or .mmif
-        return mmif_to_tokens(index, filepath)
-
-
-def ann_to_tokens(index, ann_path):
-    """this function read .ann input file and return the list of tokens"""
-
-    with open(ann_path, 'r') as fh_in:
-        lines = fh_in.readlines()
-
-    tokens = []
-    for line in lines:
-        ent = line.split()
-        entity = {"start": int(ent[2]), "end": int(ent[3]),
-                  "text": (" ".join(ent[4:])), "category": ent[1]}
-        tokens = tokens + entity_to_tokens(index, entity)
-    return tokens
-
-
-def mmif_to_tokens(index, mmif_path):
-    """this function read .mmif input file and return the list of tokens"""
-
-    with open(mmif_path) as fh_in:
-        mmif_serialized = fh_in.read()
-
-    mmif = Mmif(mmif_serialized)
-    ner_views = mmif.get_all_views_contain(at_types=Uri.NE)
-    view = ner_views[-1]  # read only the first view (from last) with Uri.NE
-    annotations = view.get_annotations(at_type=Uri.NE)
-
-    tokens = []
-    for annotation in annotations:
-        entity = annotation.properties
-        entity["start"] = view.get_annotation_by_id(entity["targets"][0]).properties["start"]
-        tokens = tokens + entity_to_tokens(index, entity)
-    return tokens
-
-
-def tokens_to_tags(tokens, span_map, mode='strict'):
-    """this function transform list of tokens to list of tags"""
-    tags = ['O'] * len(span_map)
-    for (span, tag) in tokens:
-        span_index = span_map[span]
-        tags[span_index] = tag
-
-    if mode == 'token':
-        # let each token be perceived as its own entity to 'trick' the entity-based eval module
-        new_tags = ['B-' + tag[2:] if tag.startswith('I-') else tag for tag in tags]
-        tags = new_tags
-
-    return tags
-
-
-def label_dict_to_string():
-    # get the tap-separated string for printing out label dict relatively prettily
-    return "\n".join(["original_label" + "\t" + "mapped_label"] + [k + "\t" + label_dict[k] for k in label_dict])
-
-
-def write_result(result, goldfile, testfile, resultpath):
-    # write out eval results to text file
-    s = "gold-standard directory: " + goldfile + "\n"
-    s += ("model prediction directory: " + testfile + "\n")
-    s += "\nStrict Evaluation Result\nevery token in an entity must have the matching tagging with \
-the gold standard to count as the same entity\n"
-    s += result['strict']
-    s += "\nToken-based Evaluation Result\nthe evaluation is done on the token level, and the \
-difference between B- and I- is disregarded\n"
-    s += result['token']
-    s += ("\nthe labels from both files are mapped to the following labels\nlabels not in \
-any column of the following table will be discarded\n")
-    s += ("\n" + label_dict_to_string())
-
-    with open(resultpath, 'w') as fh_out:
-        fh_out.write(s)
-
-
-def directory_to_tokens(directory):
-    tokens = []
-    index = 0
-    for file in directory:
-        tokens = tokens + file_to_tokens(index, file)
-        index += 1
-    return tokens
-
-
-def file_match(golddirectory, testdirectory):
+class NamedEntityRecognitionEvaluator(ClamsAAPBEvaluationTask):
     """
-    compares the files in the golddirectory and testdirectory, returns lists of matching gold and test files in corresponding order
-    """
-    gold_matches = []
-    test_matches = []
-    gold_list = os.listdir(golddirectory)
-    test_list = os.listdir(testdirectory)
-    for gold_file in gold_list:
-        # Yao: I've added the following two lines of code to make sure that the gold and test files have the same name
-        file_name_without_transcript = gold_file.replace('-transcript', '')
-        reg = "^" + os.path.splitext(file_name_without_transcript)[0]
-        for test_file in test_list:
-            if re.search(reg, test_file):
-                gold_matches.append(gold_file)
-                test_matches.append(test_file)
-                break
-    return [os.path.join(golddirectory, match) for match in gold_matches], [os.path.join(testdirectory, match) for match
-                                                                            in test_matches]
+    Evaluating Named Entity Recognition (NER) results, as a sequence 
+    labeling task, using precision, recall, and F1 score. The evaluation 
+    is done on the token level, meaning the boundary of each entity is
+    not taken into account.
+    (boundary information usually encoded with B, I, O tagging scheme to 
+    indicate "begin", "inside", and "outside" of an entity)
 
+    Here's an example; 
+    - gold: "Mark(PER) Zuckerburg(PER)"
+    - pred: "Mark(O) Zuckerburg(PER)"
+    then 1 miss (FN) and 1 hit (TP)
+    
+    Considering the fact that in most cases, the majority of the text 
+    content is non-entities, non-entities (`O` labels) are not included 
+    in the final score board to prevent the score skewed by the large 
+    volume of `O` labels.
+    """
+    
+    def __init__(self, batchname: str, gold_loc: Union[str, Path] = None, pred_loc: Union[str, Path] = None):
+        super().__init__(batchname, gold_loc, pred_loc)
+        self.logger.setLevel('DEBUG')
+        self.include_bio = False
 
-def file_match_with_source(golddirectory, testdirectory, sourcedirectory):
-    """
-    compares the files in golddirectory, testdirectory, sourcedirectory, 
-    returns lists of matching gold, test, and source files in corresponding order
-    """
-    gold_matches = []
-    test_matches = []
-    source_matches = []
-    gold_list = os.listdir(golddirectory)
-    test_list = os.listdir(testdirectory)
-    source_list = os.listdir(sourcedirectory)
-    for gold_file in gold_list:
-        guid = gold_file[:24]
-        for test_file in test_list:
-            if test_file.startswith(guid):
-                for source_file in source_list:
-                    if source_file.startswith(guid):
-                        gold_matches.append(gold_file)
-                        test_matches.append(test_file)
-                        source_matches.append(source_file)
+    def _read_gold(self, gold_file: Union[str, Path]) -> Any:
+        """
+        gold file is brat ann file, and this will return a list of BIO
+        tags. The ann is a tab-separated file with the following format:
+        T1	ORG 0 5	Mark
+        
+        The resulting data should be a dict, where each element represent 
+        a token (whitespace-based) with its key being (s,e) int tuple 
+        and the value being the NE label 
+        """
+        tokens = {}
+        with (open(gold_file, 'r') as in_f):
+            for linenum, line in enumerate(in_f, 1):
+                try:
+                    _, label, start, final, text = line.split(maxsplit=4)
+                except ValueError as e:
+                    self.logger.error(line, line.split())
+                    raise e
+                start = int(start)
+                if label in valid_labels:
+                    # normalize the label string, otherwise treat it as already normalized
+                    if label in label_dict:
+                        label = label_dict[label]
+                else:
+                    raise ValueError(f'invalid label found ({label}) in {gold_file}:{linenum}')
+                for tokennum, token in enumerate(text.split()):
+                    prefixed_label = label if not self.include_bio \
+                        else 'B-' + label if tokennum == 0 else 'I-' + label
+                    end = start + len(token)
+                    tokens[(start, end)] = prefixed_label
+                    start = end + 1
+        # at this point, all "positive" tokens from gold annotation are stored in the `tokens` dict
+        guid = guidhandler.get_aapb_guid_from(gold_file.name)
+        self.logger.debug(f'{guid}, GOLD total positive tokens: {len(tokens)}, first 10: {list(tokens.keys())[:10]}')
+        return tokens
+
+    def _read_pred(self, pred_file: Union[str, Path], gold) -> Any:
+        """
+        The goal here is not only to build a dict of [(start, end) : label]
+        (just like the above in the gold reader), but also to insert `O` 
+        labels to the gold dict, and finally make sure the numbers of 
+        elements in both gold and pred dicts are the same. While doing so, 
+        this code tries to fix some errors in the gold annotation. 
+        An example of such error is in `cpb-aacip-507-154dn40c26` in 
+        `newshour-namedentity` project, where source text 
+        "... It's about two Continentals. ..." (ln 335 in the source file)
+        and the annotation is only done on "Continental" (not whole token).
+        """
+        f = open(pred_file, 'r')
+        mmif_str = f.read()
+        f.close()
+        mmif = Mmif(mmif_str)
+        token_annotations_id_to_anchor = {ann.id: (mmif.get_start(ann), mmif.get_end(ann)) 
+                                          for ann in mmif.get_view_contains(Uri.TOKEN).get_annotations(at_type=Uri.TOKEN)}
+        
+        pred = {}
+        for ne in mmif.get_view_contains(Uri.NE).get_annotations(Uri.NE):
+            label = ne.get_property('category')
+            if label not in valid_labels:
+                # warn about the unknown label 
+                # self.logger.warn(f'unknown label found ({label}) in {pred_file}:{ne.id}, ignoring the entity')
+                continue
+            if 'targets' in ne.properties:
+                # meaning NE is anchored on tokens 
+                label = label_dict[label]
+                for tokennum, target in enumerate(ne.get_property('targets')):
+                    s, e = token_annotations_id_to_anchor[target]
+                    prefixed_label = label if not self.include_bio \
+                        else 'B-' + label if tokennum == 0 else 'I-' + label
+                    pred[(s, e)] = prefixed_label
+            elif 'start' in ne.properties and 'end' in ne.properties:
+                # meaning we're in trouble now since there's no easy way to know about `O` tokens without re-tokenizing 
+                # ATM, spacy wrapper always produces token annotations as well and use them as anchors for NE annotations
+                # but this an change in to future
+                raise ValueError(f'no token annotations found in {pred_file}, hence cannot process `O` tokens')
+            
+        # at this point, all "positive" tokens from pred mmif is stored in the `pred` dict 
+        guid = guidhandler.get_aapb_guid_from(pred_file.name)
+        self.logger.debug(f'{guid}, PRED total positive tokens: {len(pred)}, first 10: {list(pred.keys())[:10]}')
+        
+        # before inserting `O` tokens, do some sanity check and try to fix some obvious errors in annotation 
+        # such as "drag-to-select" only part of token
+        fixed_gold = {}
+        for gold_anchor in gold.keys():
+            if gold_anchor not in token_annotations_id_to_anchor.values():
+                fixed = False
+                for token_anchor in token_annotations_id_to_anchor.values():
+                    if gold_anchor[0] == token_anchor[0]:
+                        fixed_gold[token_anchor] = gold[gold_anchor]
+                        self.logger.debug(f'fixed gold token {gold_anchor} to {token_anchor}')
+                        fixed = True
                         break
-                break
-    return [os.path.join(golddirectory, match) for match in gold_matches], [os.path.join(testdirectory, match) for match
-                                                                            in test_matches], [
-        os.path.join(sourcedirectory, match) for match in source_matches]
+                if not fixed:
+                    raise ValueError(f'gold token {gold_anchor} not found in MMIF tokens')
+            else:
+                fixed_gold[gold_anchor] = gold[gold_anchor]
+        for pa in pred.keys():
+            if pa not in token_annotations_id_to_anchor.values():
+                raise ValueError(f'pred token {pa} not found in MMIF tokens')
+        gold = fixed_gold
 
+        # and finally, insert `O` labels for tokens not positively annotated
+        for out_token in token_annotations_id_to_anchor.values():
+            if out_token not in pred:
+                pred[out_token] = 'O'
+            if out_token not in gold:
+                gold[out_token] = 'O'
+        # at this point, both pred and gold dicts should look like 
+        # {(start, end): label} 
+        # where "label" values are one of B-X, I-X, O (X can be any of 
+        # valid category name defined at the top of the code) but the 
+        # elements in both dicts are NOT SORTED by the character offsets.
+        # Final sanity check to make sure all character offsets are
+        # in there in both gold and pred
+        pred_anchors = list(sorted(pred.keys()))
+        gold_anchors = list(sorted(gold.keys()))
+        if len(pred_anchors) != len(gold_anchors):
+            raise ValueError(f'number of tokens in pred and gold do not match in {pred_file}')
+        self.logger.debug(f'{guid}, total labels to evaluate: {len(pred_anchors)}')
+        for panchor, ganchor in zip(pred_anchors, gold_anchors):
+            if panchor != ganchor:
+                raise ValueError(f'anchors do not match between gold and pred in {pred_file}')
+        return pred, gold
+            
+    def _compare_pair(self, guid: str, gold: Any, pred: Any) -> Any:
+        pred_labels = [pred[key] for key in sorted(pred.keys())]
+        gold_labels = [gold[key] for key in sorted(gold.keys())]
+        # remove `O` labels from the calculation
+        labelset = set(pred_labels + gold_labels)
+        labelset.discard('O')
+        report = classification_report(gold_labels, pred_labels, labels=list(labelset), output_dict=True)
+        return report
 
-def tokenizer(file):
-    """returns indices of tokens in file (assumes file is a .txt)"""
-    with open(file) as f:
-        text = f.read()
-    tokens = text.split()
-    indices = []
-    prev_end = 0
-    for token in tokens:
-        find = re.search(re.escape(token), text)
-        start = find.start() + prev_end
-        end = find.end() + prev_end
-        index = (start, end)
-        indices.append(index)
-        text = text[find.end():]
-        prev_end = end
-    return indices
+    def _compare_all(self, golds, preds) -> Any:
+        agg_gold_labels = []
+        agg_pred_labels = []
+        for gold, pred in zip(golds, preds):
+            agg_gold_labels.extend([gold[key] for key in sorted(gold.keys())])
+            agg_pred_labels.extend([pred[key] for key in sorted(pred.keys())])
+        # remove `O` labels from the calculation
+        labelset = set(agg_pred_labels + agg_gold_labels)
+        labelset.discard('O')
+        report = classification_report(agg_gold_labels, agg_pred_labels, labels=list(labelset), output_dict=False)
+        return report
 
-
-def get_guid(triple):
-    """returns guid for a triple of files"""
-    name = pathlib.Path(triple[0]).stem
-    parts = re.split(r'[-_]', name)
-    guid = parts[0] + "-" + parts[1] + "-" + parts[2] + "-" + parts[3]
-    return guid
-
-
-def read_tokenized_labels(filepath):
-    if filepath.endswith('.ann'):
-        return ann_labels(filepath)
-    else:  # mmif file, ends with .json or .mmif
-        return mmif_labels(filepath)
-
-
-def ann_labels(ann_path):
-    with open(ann_path, 'r') as fh_in:
-        lines = fh_in.readlines()
-
-    tokens = {}
-    for line in lines:
-        ent = line.split()
-        entity = {"start": int(ent[2]), "end": int(ent[3]),
-                  "text": (" ".join(ent[4:])), "category": ent[1]}
-        tokens.update(entity_labels(entity))
-    return tokens
-
-
-def mmif_labels(mmif_path):
-    with open(mmif_path) as fh_in:
-        mmif_serialized = fh_in.read()
-
-    mmif = Mmif(mmif_serialized)
-    ner_views = mmif.get_all_views_contain(at_types=Uri.NE)
-    view = ner_views[-1]  # read only the first view (from last) with Uri.NE
-    annotations = view.get_annotations(at_type=Uri.NE)
-
-    tokens = {}
-    for annotation in annotations:
-        entity = annotation.properties
-        entity["start"] = view.get_annotation_by_id(entity["targets"][0]).properties["start"]
-        tokens.update(entity_labels(entity))
-    return tokens
-
-
-def entity_labels(entity):
-    words = entity['text'].split()
-    start = entity['start']
-    tokens = {}
-    label = entity['category']
-    if label not in valid_labels:  # e.g. QUANTITY
-        return tokens  # do not include in the final list of entities
-    if label in label_dict:
-        label = label_dict[label]  # e.g. ORG -> organization
-    for i, word in enumerate(words):
-        end = start + len(word)
-        # if i == 0:
-        #     tokens[(start, end)] = 'B-' + label
-        # else:
-        tokens[(start, end)] = label
-        start = end + 1
-    return tokens
-
-
-def generate_side_by_side(triples, outdir):
-    for triple in triples:
-        guid = get_guid(triple)
-        path = outdir / f"{guid}.sbs.csv"
-        with open(path, "w") as out_f:
-            source_tokens = tokenizer(triple[0])
-            gold_tokenized_labels = read_tokenized_labels(triple[1])
-            pred_tokenized_labels = read_tokenized_labels(triple[2])
-            for i, token in enumerate(source_tokens, 1):
-                if token in gold_tokenized_labels:
-                    gold = gold_tokenized_labels[token]
-                else:
-                    gold = "O"
-                if token in pred_tokenized_labels:
-                    pred = pred_tokenized_labels[token]
-                else:
-                    pred = "O"
-                out_f.write(",".join([str(i), gold, pred]))
-                out_f.write("\n")
-
-
-def evaluate(golddirectory, testdirectory, sourcedirectory, resultpath, outdir):
-    if sourcedirectory:
-        gold_matches, test_matches, source_matches = file_match_with_source(golddirectory, testdirectory, sourcedirectory)
-        generate_side_by_side(zip(source_matches, gold_matches, test_matches), outdir)
-    else:
-        gold_matches, test_matches = file_match(golddirectory, testdirectory)
-
-    tokens_true = directory_to_tokens(gold_matches)
-    tokens_pred = directory_to_tokens(test_matches)
-
-    # find a dict that maps all entity spans to indices
-    tokens_all = (tokens_true + tokens_pred)
-    spans_all = sorted(set([span for (span, label) in tokens_all]))
-    span_map = {span: i for i, span in enumerate(spans_all)}
-
-    result = {}
-    for mode in ['strict', 'token']:
-        y_true = tokens_to_tags(tokens_true, span_map, mode)
-        y_pred = tokens_to_tags(tokens_pred, span_map, mode)
-        result[mode] = classification_report([y_true], [y_pred], mode='strict', output_dict=False)
-        # do NOT change mode to 'token' here even if we're doing token-based eval, since \
-        # we have already dealt with that in the tokens_to_tags function
-
-    write_result(result, golddirectory, testdirectory, resultpath)
-    print("evaluation for " + testdirectory + " is complete")
+    def _finalize_results(self):
+        if len(self._calculations) == 1 and '*' in self._calculations:
+            self.results = self._calculations['*']
+        else:
+            self.results = self._calculations
 
 
 if __name__ == "__main__":
-
-    parser = argparse.ArgumentParser()
-    parser.add_argument('-g', '--gold_directory', nargs='?', help="directory that contains gold annotations")
-    parser.add_argument('-m', '--machine_directory', nargs='?', help="directory that contains machine annotations")
-    parser.add_argument('-r', '--result_path', nargs='?', help="path to print out eval result", default='results.txt')
-    parser.add_argument('-s', '--source_directory', nargs='?',
-                        help="directory that contains original source files (without annotations)", default=None)
-    parser.add_argument('-o', '--out_directory', nargs='?', help="directory to publish the side by side comparison",
-                        default=None)
+    parser = NamedEntityRecognitionEvaluator.prep_argparser()
     args = parser.parse_args()
-    if args.out_directory:
-        outdir = pathlib.Path(args.out_directory)
-    else:
-        outdir = pathlib.Path(__file__).parent
-    if args.gold_directory:
-        evaluate(args.gold_directory, args.machine_directory, args.source_directory, args.result_path, outdir)
-    else:
-        url = 'https://github.com/clamsproject/aapb-annotations/tree/main/newshour-namedentity/golds/aapb-collaboration-21'
-        evaluate(download_golds(url), args.machine_directory, args.source_directory, args.result_path, outdir)
 
-"""
-example usage:
-python evaluate.py gold-files test-files
-NOTE: gold annotation files and test output files that correspond to the same aapb catalog item must share the same file name (with the exception of file extension). i.e. gold-files/cpb-aacip-507-1v5bc3tf81-transcript.ann and test-files/cpb-aacip-507-1v5bc3tf81-transcript.mmif) 
-"""
-
-# If gold is "Mark(B-PER) Zuckerburg(I-PER)" and model predict "Zuckerburg(B-PER)"
-# strict:  1 FP (entity "Zuckerburg(PER)") and 1 FN (entity "Mark Zuckerburg(PER)")
-# token: 1 TP (token "Zuckerburg(PER)") and 1 FN (token "Mark(PER)"), note that the evaluation doesn't care between B- and I- difference
+    evaluator = NamedEntityRecognitionEvaluator(args.batchname, args.golds, args.preds)
+    evaluator.calculate_metrics(by_guid=False)
+    report = evaluator.write_report()
+    args.export.write(report.getvalue())

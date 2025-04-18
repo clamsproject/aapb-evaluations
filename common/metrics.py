@@ -5,6 +5,7 @@ as scipy, jiwer, etc. to provide a common interface for evaluation.
 
 """
 from sklearn.metrics import precision_recall_fscore_support as skprecision_recall_fscore_support
+from sklearn.metrics import classification_report as skclassification_report
 import jiwer 
 
 
@@ -57,3 +58,11 @@ def precision_recall_fscore(y_true, y_pred, **kwargs):
     p, r, f, s = skprecision_recall_fscore_support(y_true, y_pred, **kwargs)
     return p, r, f
 
+
+def classification_report(y_true, y_pred, **kwargs):
+    """
+    Wrapper for sklearn.metrics.classification_report
+    See https://scikit-learn.org/stable/modules/generated/sklearn.metrics.classification_report.html#sklearn.metrics.classification_report
+    for more information.
+    """
+    return skclassification_report(y_true, y_pred, **kwargs)
