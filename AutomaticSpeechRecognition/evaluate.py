@@ -45,7 +45,7 @@ class AutomaticSpeechRecognitionEvaluator(ClamsAAPBEvaluationTask):
         annotation = next(td_views[-1].get_annotations(DocumentTypes.TextDocument))
         text = annotation.text_value
 
-        return text
+        return text, gold
 
     def _compare_pair(self, guid: str, gold: Any, pred: Any) -> Any:
         """

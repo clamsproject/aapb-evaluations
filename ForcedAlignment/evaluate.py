@@ -186,7 +186,7 @@ class ForcedAlignmentEvaluator(ClamsAAPBEvaluationTask):
             self.logger.debug(f'system token iteration is done , last timeframe {start}, {e}')
             end = e / 1000 if timeunit.startswith('mill') else e
             pred[Segment(start, end)] = ' '.join(ref_segment_text)
-        return pred
+        return pred, reference
 
     def _compare_pair(self, guid, reference: Any, hypothesis: Any) -> Any:
         

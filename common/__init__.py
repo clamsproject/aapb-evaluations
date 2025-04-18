@@ -22,12 +22,12 @@ import os
 import sys
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Union, Iterable, Any, Tuple
+from typing import Union, Iterable, Any, Tuple, Optional
 
 from clams_utils.aapb import guidhandler, goldretriever
 
 logging.basicConfig(
-    level=logging.WARNING,
+    level=logging.INFO,
     format="%(asctime)s %(name)s %(levelname)-8s %(thread)d %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S")
 
@@ -53,11 +53,11 @@ class ClamsAAPBEvaluationTask(ABC):
         """
         self._taskname = 'NO-TASK' if self.__class__ == ClamsAAPBEvaluationTask else \
             Path(inspect.getfile(self.__class__)).parent.name  # use the name of the directory as the name
+        self.logger = logging.getLogger(self._taskname)
         self.pairs = {}  # guid: [gold, pred] pairs
         if batchname is not None:
             self._set_guids_from_batchname(batchname)
-        self.logger = logging.getLogger(self._taskname)
-        
+
         # read data file paths
         self._gold_loc = gold_loc
         self._pred_loc = pred_loc
@@ -181,19 +181,28 @@ class ClamsAAPBEvaluationTask(ABC):
                              "prediction files. Use a batch name or "
                              "gold_dir to set the target GUIDs.")
         
+        matched = 0
         for f in pred_dir.iterdir():
             if not f.is_file():
                 continue
             guid = guidhandler.get_aapb_guid_from(f.name)
             if guid is not None and guid in self.pairs:
+                self.logger.debug(f'found a pair to include in the evaluation: {guid}')
+                matched += 1
                 self.pairs[guid][1] = f
+        self.logger.debug(f'#gold instances: {len(self.pairs)}, #matched instances: {matched}')
 
     @abstractmethod
-    def _read_pred(self, pred_file: Union[str, Path], gold) -> Any:
+    def _read_pred(self, pred_file: Union[str, Path], gold: Optional[Any]) -> Tuple[Any, Optional[Any]]:
         """
-        Read the pred file and return the processed data. The data should be ready for comparing and calculating metrics.
-        For some cases, gold data might be needed to process the pred data.
-        If not, pass None to the gold argument.
+        Read the pred file and return the processed data. The data should 
+        be ready for comparing and calculating metrics. For some cases, 
+        gold data might be needed to process the pred data, or gold data
+        might need to be updated based on the pred data (e.g., pad dummy 
+        tokens to match data size). If gold data is not needed in this 
+        process, just pass None. 
+        The method must return a tuple of (pred, gold) data. When the 
+        passed gold data is just None, return None for the second element.
         """
         raise NotImplementedError
 
@@ -209,7 +218,9 @@ class ClamsAAPBEvaluationTask(ABC):
             gold = self._read_gold(gold_f)
             if pred_f is not None:
                 try:
-                    pred = self._read_pred(pred_f, gold)
+                    pred, new_gold = self._read_pred(pred_f, gold)
+                    if new_gold is not None:
+                        gold = new_gold
                 except Exception as e:
                     UserWarning(f"Error reading pred file {pred_f}: {e}")
                     pred = None
@@ -246,23 +257,24 @@ class ClamsAAPBEvaluationTask(ABC):
                 if gold is None or pred is None:
                     RuntimeWarning('fdsa')
                     continue
-                a_score = self._compare_pair(guid, gold, pred)
-                self._calculations[guid] = a_score
+                self._calculations[guid] = self._compare_pair(guid, gold, pred)
         else:
             golds = []
             preds = []
             for guid, gold, pred in self._read_data_pairs():
-                golds.append(gold)
-                preds.append(pred)
+                if pred is not None:  # when no match found, pred is None
+                    golds.append(gold)
+                    preds.append(pred)
             # passing asterisk to indicate that the comparison is for all guids
             self._calculations['*'] = self._compare_all(golds, preds)
 
     @abstractmethod
     def _finalize_results(self):
         """
-        If any aggregation or finalization is needed, do it here. If no 
-        such step is needed, just `pass`. Note that this method WILL 
-        always be called within report generation method.
+        Use this method to aggregate scores from `self._calculations` 
+        value and put it in the `self._results` attribute. Note that this 
+        method WILL always be called within report generation method, and
+        only values from `self._results` will be used. 
         """
         raise NotImplementedError
 
