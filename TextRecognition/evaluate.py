@@ -1,195 +1,139 @@
-import argparse
-import csv
-import json
-import os
-import pathlib
-import re
-from collections import defaultdict
-from typing import Dict, Union, Tuple, Iterable
+from pathlib import Path
+from typing import Any, Union, Tuple, Dict
 
 import numpy
-from mmif import Mmif, AnnotationTypes, DocumentTypes
-from mmif.utils import video_document_helper as vdh
-from torchmetrics.text import CharErrorRate
+import pandas as pd
+from mmif import AnnotationTypes, DocumentTypes, Mmif
+from mmif.utils import timeunit_helper as tuh
 
-from clams_utils.aapb import goldretriever as gr
-
-# Constants ==|
-GOLD_URL = 'https://github.com/clamsproject/aapb-annotations/tree/f96f857ef83acf85f64d9a10ac8fe919e06ce51e/newshour-chyron/golds/batch2'
-
-
-def filename_to_guid(filename) -> str:
-    guid = pathlib.Path(filename).stem
-    if "." in guid:
-        guid = guid.split('.')[0]
-    return guid
+from common import ClamsAAPBEvaluationTask
+from common.helpers import find_range_index
+from common.metrics import cer
 
 
-def load_reference(ref_fname) -> Dict[Tuple[float, float], str]:
-    gold_annotations = {}
-    with open(ref_fname, 'r', encoding='utf8') as f:
-        reader = csv.reader(f)
-        for i, row in enumerate(reader):
-            if i == 0:
+class AutomaticSpeechRecognitionEvaluator(ClamsAAPBEvaluationTask):
+    """
+    Evaluating Text Recognition (a.k.a OCR) results, using CER (Character 
+    Error Rate) metric. CER calculates the accuracy on the character level,
+    using edit distance algorithm. In other words, CER tells "how many edits"
+    it takes corrent the predicted result into the gold standard text. That 
+    said, note that 
+
+    1. For CER, the lower the value, the better the performance.
+    1. CER can be more that 100%, although it sounds strange. 
+
+    General information on TR evaluation can be found https://en.wikipedia.org/wiki/Optical_character_recognition#Accuracy
+    And more details on the edit distance (Levenshtein algorithm) can be found https://en.wikipedia.org/wiki/Levenshtein_distance
+    """
+
+    def _read_gold(self, gold_file: Union[str, Path]) -> Dict[Tuple[int, int], str]:
+        """
+        To handle both timepoint-wise gold annotations (transcribed-X series) and 
+        timeframe-wise gold annotations (newshour-chyron) 
+        this will read csv data and 
+        
+        :return: a dict from (start, end) tuple to text, where start (inclusive) and end (exclusive) are in milliseconds. For timepoint-wise annotation (with `at` column in the gold data), start will be the `at` value, end will be `at`+1. 
+        
+        """
+        df = pd.read_csv(gold_file)
+        # if `at` column? timepoint annotation
+        if 'at' in df.columns:
+            # rename to start 
+            df = df.rename(columns={'at': 'start'})
+            # convert value to ms using tuh.convert 
+            df['start'] = df['start'].apply(lambda x: tuh.convert(x, 'iso', 'milliseconds'))
+            # add end column, value is start + 1 
+            df['end'] = df['start'] + 1
+        elif 'start' in df.columns and 'end' in df.columns:
+            df['start'] = df['start'].apply(lambda x: tuh.convert(x, 'iso', 'milliseconds', 1))
+            df['end'] = df['end'].apply(lambda x: tuh.convert(x, 'iso', 'milliseconds', 1))
+        else:
+            raise ValueError(f"Gold file {gold_file} must have either 'at' column or 'start' and 'end' columns.")
+        # then "un"-escape newlines
+        df['text-transcript'] = df['text-transcript'].apply(lambda x: x.replace('\\n', '\n'))
+        # convert to dict
+        return {(row['start'], row['end']): row['text-transcript'] for _, row in df.iterrows()}
+
+    def _read_pred(self, pred_file: Union[str, Path], gold) -> Any:
+        """
+        Assuming a video OCR scenario where 
+        1. TR ran on a specific time point (extracted still image)
+        1. TR results are stored as `TextDocument` (and ignore all other "sub" types such as `Paragraph`, `Sentence`, `Token`)
+        1. TR results are `Aligned` to `BoundingBox` annotations (and bbox has temporal information)
+        
+        # TODO (krim @ 5/1/25): image OCR scenario for the future?
+        
+        :return: (a dict from int (millisecond) to TR result text, gold as-is)
+        """
+        f = open(pred_file, 'r')
+        mmif_str = f.read()
+        f.close()
+        data = Mmif(mmif_str)
+        cand_views = data.get_all_views_contain(
+            DocumentTypes.TextDocument, AnnotationTypes.Alignment, AnnotationTypes.BoundingBox
+        )
+        if not cand_views:
+            raise Exception("No TR view found in the MMIF file. A TR view should contain BoundingBox, TextDocument, and Alignment annotations")
+        # pick the last 
+        tr_view = cand_views[-1]
+        # NOTE that we're also dealing with video scenario
+        fps = next(doc.get_property('fps') for doc in data.documents if doc.get_property('fps'))
+        preds = {}
+        for td in tr_view.get_annotations(DocumentTypes.TextDocument):
+            for ali in td.get_all_aligned():
+                # TD is aligned directly to the representative frame, 
+                # while sub-structures (paragraph, sents, tokens) can be aligned to individual bounding boxes
+                if ali.at_type == AnnotationTypes.TimePoint:
+                    in_unit = 'milliseconds' if 'timeunit' not in ali.properties else ali.get_property('timeunit')
+                    preds[tuh.convert(data.get_start(ali), in_unit, 'milliseconds', fps)] = td.text_value
+        return preds, gold
+
+    def _compare_pair(self, guid: str, gold: Any, pred: Any) -> Any:
+        """
+        returns WER scores one for cased and another for uncased (ignore case)
+        """
+        cased_cers = []
+        uncased_cers = []
+        # keys of the gold dict is (s, e) range, extract and sort by the start
+        gold_ranges = sorted(list(gold.keys()), key=lambda x: x[0])
+        for pred_tp, pred_str in pred.items():
+            range_idx = find_range_index(gold_ranges, pred_tp)
+            if range_idx == -1:
+                # this means the prediction is outside of any gold range
+                # TODO (krim @ 5/1/25): how to handle this?
                 continue
-            start, end, text = row
-            # text normalization MUST write about this in the report!
-            text = text.strip().lower()
-            text = text.replace(r'\n', ' ')
-            gold_annotations.update({(start, end): text})
-    return gold_annotations
+            # otherwise, we have a valid range
+            gold_str = gold[gold_ranges[range_idx]]
+            cased_cers.append(cer(pred_str, gold_str, exact_case=True))
+            uncased_cers.append(cer(pred_str, gold_str, exact_case=False))
+        if len(cased_cers) == 0:
+            return -1, -1
+        return numpy.mean(cased_cers), numpy.mean(uncased_cers)
+
+    def _compare_all(self, golds, preds) -> Any:
+        """
+        Compare all golds and preds is NOT implemented, hence do not 
+        call ``calculate_metrics`` with ``by_guid=False``.
+        """
+        raise NotImplementedError("Comparing all golds and preds is not implemented. ")
+
+    def _finalize_results(self):
+        cols = 'GUID mean-CER-cased mean-CER-uncased'.split()
+
+        df = pd.DataFrame(
+            [[guid] + list(results) for guid, results in self._calculations.items() if results],
+            columns=cols
+        )
+        # then add the average row, ignoring negative values
+        df.loc[len(df)] = ['Average'] + [df[df[col] > 0][col].mean() for col in df.columns[1:]]
+        self._results = df.to_csv(index=False, sep=',', header=True)
 
 
-def load_references(ref_dir: Union[str, pathlib.Path]) -> Dict[str, Dict[Tuple[float, float], str]]:
-    """
-    Loads OCR data from the gold directory, 
-    text transcripts are keyed by guid, then by (start, end) tuple ,
-    where start and end are in seconds (floats)
-    """
-    ref_dir = pathlib.Path(ref_dir)
-    refs = {}
-    for ref_src_fname in ref_dir.glob("*.?sv"):
-        guid = filename_to_guid(ref_src_fname)
-        refs[guid] = load_reference(ref_src_fname)
-    return refs
-
-
-def load_hypotheses(mmif_files: Iterable[pathlib.Path]) -> Dict[str, Dict[float, str]]:
-    """
-    Load in hypothesis mmifs and retrieve annotations,
-    text transcripts are keyed by guid, then by timepoint (float)
-    the unit of the timepoints is seconds (converted if necessary, assuming 29.97 fps)
-    """
-    hyps = defaultdict(dict)
-    for mmif_file in mmif_files:
-        guid = filename_to_guid(mmif_file)
-        mmif = Mmif(open(mmif_file).read())
-        vd = mmif.get_documents_by_type(DocumentTypes.VideoDocument)[0]
-        try:
-            fps = vd.get('fps')
-        except KeyError:
-            # meaning there were no video document or no file found for the VD
-            continue
-        ocr_view = mmif.get_view_contains(AnnotationTypes.Alignment)
-        bb_view = mmif.get_view_contains(AnnotationTypes.BoundingBox)
-        tp_view = mmif.get_view_contains(AnnotationTypes.TimePoint)
-        if ocr_view is not None:
-            anno_id_to_annotation = {annotation.id: annotation
-                                     for annotation in ocr_view.annotations}
-            doc_id_to_doc = {doc.id: doc
-                             for doc in mmif.get_documents_by_type(DocumentTypes.TextDocument)}
-        if bb_view is not None:
-            anno_id_to_annotation.update({annotation.id: annotation
-                                          for annotation in bb_view.annotations})
-        ocr_results = hyps[guid]
-        if ocr_view is not None:
-            if "doctr" in ocr_view.metadata.app.lower():
-                for alignment in ocr_view.get_annotations(AnnotationTypes.Alignment):
-                    source_id = alignment.properties['source']
-                    target_id = alignment.properties['target']
-                    if source_id.startswith("tp"):
-                        source_anno = tp_view[source_id]
-                        target_doc = doc_id_to_doc[target_id]
-                        time_point = vdh.convert(source_anno.properties['timePoint'], 'milliseconds', 'seconds', fps)
-                        time_text = target_doc.text_value
-                        time_text = time_text.strip().lower()
-                        # Remove newlines and double newlines
-                        time_text = re.sub(r'\n+', ' ', time_text)
-                        ocr_results[time_point] = time_text
-            elif "paddle" in ocr_view.metadata.app.lower():
-                for alignment in ocr_view.get_annotations(AnnotationTypes.Alignment):
-                    if "td" in alignment.properties['target']:
-                        source_id = alignment.properties['source']
-                        target_id = alignment.properties['target']
-                        source_anno = tp_view[source_id.split(":")[1]]
-                        target_doc = doc_id_to_doc[target_id.split(":")[1]]
-                        time_point = vdh.convert(source_anno.properties['timePoint'], 'milliseconds', 'seconds', fps)
-                        time_text = target_doc.text_value
-                        time_text = time_text.strip().lower()
-                        # Remove newlines and double newlines
-                        time_text = re.sub(r'\n+', ' ', time_text)
-                        ocr_results[time_point] = time_text
-            else:
-                for annotation in ocr_view.annotations:
-                    if annotation.at_type == AnnotationTypes.Alignment:
-                        source_id = annotation.properties['source']
-                        target_id = annotation.properties['target']
-                        vid_anno, bbox_anno = source_id.split(":")
-                        source_anno = anno_id_to_annotation[bbox_anno]
-                        target_anno = anno_id_to_annotation[target_id]
-                        time_point = vdh.convert(source_anno.properties['timePoint'], 'frames', 'seconds', fps)
-                        time_text = target_anno.properties['text'].value
-                        time_text = time_text.strip().lower()
-                        if time_point not in ocr_results:
-                            ocr_results[time_point] = time_text
-                        else:
-                            ocr_results[time_point] = ocr_results[time_point] + ' ' + time_text
-    return hyps
-
-
-def cer_by_timeframe(ref: Dict[tuple, str], hyp: Dict[float, str]):
-    vals = {}
-    doc_level_cer = CharErrorRate()
-    for timepoint, text in hyp.items():
-        for timespan, gold_text in ref.items():
-            start = float(timespan[0])
-            end = float(timespan[1])
-            if start <= timepoint and end > timepoint:
-                if start not in vals:
-                    vals[start] = {'ref_text': gold_text, 'hyp_text': text}
-                else:
-                    if len(vals[start]['hyp_text']) < len(text):
-                        vals[start]['hyp_text'] = text
-        for comp in vals.values():
-            comp['cer'] = doc_level_cer(comp['hyp_text'], comp['ref_text']).item()
-    return vals
-
-
-def evaluate(gold_data: Dict[str, Dict[tuple, str]], test_data: Dict[str, Dict[float, str]],
-             outdir: pathlib.Path) -> None:
-    output = {}
-    for guid, annotations in test_data.items():
-        if guid in gold_data:
-            results = cer_by_timeframe(gold_data[guid], annotations)
-            output[guid] = results
-            cers = [comp['cer'] for comp in results.values()]
-            output[guid]['mean_cer'] = numpy.mean(cers)
-            with open(outdir/f'{guid}.json', 'w') as b:
-                json.dump(results, b, indent=2)
-    cers = []
-    with open(outdir/'results.txt', 'w') as f:
-        for guid, results in output.items():
-            cers.append(results['mean_cer'])
-            f.write(f'{guid}:\t{results["mean_cer"]}\n')
-        f.write(f"Total Mean CER:\t{numpy.mean(cers)}\n")
-
-
-# Main Block
 if __name__ == "__main__":
-    APPNAME = "app-doctr-wrapper"  # default app
-    APPVERSION = 1.0  # default version 
-
-    parser = argparse.ArgumentParser(description="compare the results of CLAMS OCR apps to a gold standard")
-    parser.add_argument('-t', '--test-dir',
-                        type=str,
-                        default=None,
-                        help="Directory of non-gold/hypothesis mmif files")
-    parser.add_argument('-g', '--gold-dir',
-                        type=str,
-                        default=None,
-                        help="Directory of gold annotations")
-    parser.add_argument('-o', '--output-dir',
-                        type=str,
-                        default=None,
-                        help="Directory to store results")
+    parser = AutomaticSpeechRecognitionEvaluator.prep_argparser()
     args = parser.parse_args()
 
-    ref_dir = gr.download_golds(GOLD_URL) if args.gold_dir is None else args.gold_dir
-    hyp_dir = f"preds@{APPNAME}{APPVERSION}@batch2" if args.test_dir is None else args.test_dir
-    out_dir = pathlib.Path(args.output_dir) if args.output_dir else pathlib.Path(f"results@{APPNAME}{APPVERSION}@batch2")
-    if not out_dir.exists():
-        out_dir.mkdir()
-
-    references = load_references(pathlib.Path(ref_dir))
-    hypotheses = load_hypotheses(pathlib.Path(hyp_dir).glob("*.mmif*"))
-    evaluate(references, hypotheses, out_dir)
+    evaluator = AutomaticSpeechRecognitionEvaluator(args.batchname, args.golds, args.preds)
+    evaluator.calculate_metrics(by_guid=True)
+    report = evaluator.write_report()
+    args.export.write(report.getvalue())
