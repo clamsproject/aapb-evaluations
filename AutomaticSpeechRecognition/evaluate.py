@@ -28,10 +28,10 @@ class AutomaticSpeechRecognitionEvaluator(ClamsAAPBEvaluationTask):
     More details can be found https://en.wikipedia.org/wiki/Word_error_rate . 
     We use `jiwer` python library as the implementation of WER calculation.
     """
-    def _read_gold(self, gold_file: Union[str, Path]) -> Any:
+    def _read_gold(self, gold_file: Union[str, Path], **kwargs) -> Any:
         return newshour_transcript_cleanup.file_cleaner(str(gold_file))
 
-    def _read_pred(self, pred_file: Union[str, Path], gold) -> Any:
+    def _read_pred(self, pred_file: Union[str, Path], gold, **kwargs) -> Any:
         f = open(pred_file, 'r')
         mmif_str = f.read()
         f.close()

@@ -26,7 +26,7 @@ class AutomaticSpeechRecognitionEvaluator(ClamsAAPBEvaluationTask):
     And more details on the edit distance (Levenshtein algorithm) can be found https://en.wikipedia.org/wiki/Levenshtein_distance
     """
 
-    def _read_gold(self, gold_file: Union[str, Path]) -> Dict[Tuple[int, int], str]:
+    def _read_gold(self, gold_file: Union[str, Path], **kwargs) -> Dict[Tuple[int, int], str]:
         """
         To handle both timepoint-wise gold annotations (transcribed-X series) and 
         timeframe-wise gold annotations (newshour-chyron) 
@@ -54,7 +54,7 @@ class AutomaticSpeechRecognitionEvaluator(ClamsAAPBEvaluationTask):
         # convert to dict
         return {(row['start'], row['end']): row['text-transcript'] for _, row in df.iterrows()}
 
-    def _read_pred(self, pred_file: Union[str, Path], gold) -> Any:
+    def _read_pred(self, pred_file: Union[str, Path], gold, **kwargs) -> Any:
         """
         Assuming a video OCR scenario where 
         1. TR ran on a specific time point (extracted still image)

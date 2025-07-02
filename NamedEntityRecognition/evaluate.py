@@ -51,12 +51,12 @@ class NamedEntityRecognitionEvaluator(ClamsAAPBEvaluationTask):
     volume of `O` labels.
     """
     
-    def __init__(self, batchname: str, gold_loc: Union[str, Path] = None, pred_loc: Union[str, Path] = None):
+    def __init__(self, batchname: str, gold_loc: Union[str, Path] = None, pred_loc: Union[str, Path] = None, **kwargs):
         super().__init__(batchname, gold_loc, pred_loc)
         self.logger.setLevel('DEBUG')
         self.include_bio = False
 
-    def _read_gold(self, gold_file: Union[str, Path]) -> Any:
+    def _read_gold(self, gold_file: Union[str, Path], **kwargs) -> Any:
         """
         gold file is brat ann file, and this will return a list of BIO
         tags. The ann is a tab-separated file with the following format:
@@ -92,7 +92,7 @@ class NamedEntityRecognitionEvaluator(ClamsAAPBEvaluationTask):
         self.logger.debug(f'{guid}, GOLD total positive tokens: {len(tokens)}, first 10: {list(tokens.keys())[:10]}')
         return tokens
 
-    def _read_pred(self, pred_file: Union[str, Path], gold) -> Any:
+    def _read_pred(self, pred_file: Union[str, Path], gold, **kwargs) -> Any:
         """
         The goal here is not only to build a dict of [(start, end) : label]
         (just like the above in the gold reader), but also to insert `O` 

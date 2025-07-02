@@ -56,7 +56,7 @@ class ForcedAlignmentEvaluator(ClamsAAPBEvaluationTask):
         except ValueError:
             raise ValueError("Invalid time format. Expected format: hh:mm:ss.mmm")
 
-    def _read_gold(self, gold_file: Union[str, Path]) -> Any:
+    def _read_gold(self, gold_file: Union[str, Path], **kwargs) -> Any:
         gold_timeframes = Annotation()
         df = pd.read_csv(gold_file, sep='\t')
         for index, row in df[['start', 'end', 'speech-transcript']].iterrows():
@@ -83,7 +83,6 @@ class ForcedAlignmentEvaluator(ClamsAAPBEvaluationTask):
         text = text.replace("...", " ")
         # text = text.replace("'re", " re")
         return text
-
 
     def normalize_cadet_tokens(self, text):
         """
@@ -133,7 +132,7 @@ class ForcedAlignmentEvaluator(ClamsAAPBEvaluationTask):
         self.logger.debug(f'norm: {tokens}')
         return tokens
 
-    def _read_pred(self, pred_file: Union[str, Path], reference) -> Any:
+    def _read_pred(self, pred_file: Union[str, Path], reference, **kwargs) -> Any:
         pred = Annotation()
         guid = guidhandler.get_aapb_guid_from(str(pred_file))
         self.logger.debug(guid)

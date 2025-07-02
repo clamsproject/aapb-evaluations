@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import sys
+import warnings
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Union, Iterable, Any, Tuple, Optional
@@ -44,7 +45,7 @@ if 'LOCAL_AAPB_ANNOTATIONS' in os.environ:
 
 class ClamsAAPBEvaluationTask(ABC):
 
-    def __init__(self, batchname: str, gold_loc: Union[str, Path] = None, pred_loc: Union[str, Path] = None):
+    def __init__(self, batchname: str, gold_loc: Union[str, Path] = None, pred_loc: Union[str, Path] = None, **kwargs):
         """
         Initialize the evaluation task with a batch name. A "batch" is a 
         collection of AAPB GUIDs that are used for evaluation. The batch
@@ -65,7 +66,13 @@ class ClamsAAPBEvaluationTask(ABC):
         self._get_pred_files(pred_loc)
 
         self._results = None
+        # variable to store scores for each guid, and overall scores under '*' key
         self._calculations = {}
+        # decide if "side-by-side" view is needed (e.g., for visualization)
+        self._do_sbs = kwargs.get('sbs', False)
+        # use a separate variable to store side-by-side results, if needed
+        # then use `self._write_side_by_side_view` to "pretty-print" the results
+        
 
     @property
     def taskname(self) -> str:
@@ -160,7 +167,7 @@ class ClamsAAPBEvaluationTask(ABC):
                     self.pairs[guid][0] = f
             
     @abstractmethod
-    def _read_gold(self, gold_file: Union[str, Path]) -> Any:
+    def _read_gold(self, gold_file: Union[str, Path], **kwargs) -> Any:
         """
         Read the pred file and return the processed data. The data should 
         be ready for comparing and calculating metrics by `_compareXXX` 
@@ -193,7 +200,7 @@ class ClamsAAPBEvaluationTask(ABC):
         self.logger.debug(f'#gold instances: {len(self.pairs)}, #matched instances: {matched}')
 
     @abstractmethod
-    def _read_pred(self, pred_file: Union[str, Path], gold: Optional[Any]) -> Tuple[Any, Optional[Any]]:
+    def _read_pred(self, pred_file: Union[str, Path], gold: Optional[Any], **kwargs) -> Tuple[Any, Optional[Any]]:
         """
         Read the pred file and return the processed data. The data should 
         be ready for comparing and calculating metrics. For some cases, 
@@ -222,7 +229,7 @@ class ClamsAAPBEvaluationTask(ABC):
                     if new_gold is not None:
                         gold = new_gold
                 except Exception as e:
-                    UserWarning(f"Error reading pred file {pred_f}: {e}")
+                    warnings.warn(f"Error reading pred file {pred_f}: {e}", RuntimeWarning)
                     pred = None
             else:
                 pred = None
@@ -254,10 +261,18 @@ class ClamsAAPBEvaluationTask(ABC):
         """
         if by_guid:
             for guid, gold, pred in self._read_data_pairs():
-                if gold is None or pred is None:
-                    RuntimeWarning('fdsa')
+                if gold is None:
+                    warnings.warn(f"Skipping evaluation for {guid} due to missing gold data.", RuntimeWarning)
                     continue
-                self._calculations[guid] = self._compare_pair(guid, gold, pred)
+                elif pred is None:
+                    if self.pairs[guid][1] is not None:
+                        # meaning file is there, but no data was read for any reason (e.g., missing target annotations)
+                        self._calculations[guid] = False
+                    else:
+                        # meaning no file was found for the guid, so skip
+                        continue
+                else:
+                    self._calculations[guid] = self._compare_pair(guid, gold, pred)
         else:
             golds = []
             preds = []
@@ -277,6 +292,17 @@ class ClamsAAPBEvaluationTask(ABC):
         only values from `self._results` will be used. 
         """
         raise NotImplementedError
+    
+    @abstractmethod
+    def write_side_by_side_view(self):
+        """
+        Write side-by-side view of the results.
+        This method will be called from inside the `write_report` method 
+        when `self._do_sbs` has any non-false value, which is optional. This 
+        could also be called independently to write the side-by-side 
+        without the full report. 
+        """
+        raise NotImplementedError
 
     def write_report(self) -> io.StringIO:
         """
@@ -286,7 +312,7 @@ class ClamsAAPBEvaluationTask(ABC):
         self._finalize_results()
         report = io.StringIO()
         report.write(f"# Evaluation Report for `{self.taskname}` task as of {datetime.datetime.now()}\n")   
-        report.write(f"\n## Evaluation method\n{self.__doc__}\n")
+        report.write(f"\n## Evaluation method\n{inspect.cleandoc(self.__doc__)}\n")
         report.write(f"\n## Data specs\n"
                      f"- Groundtruth data location: {self._gold_loc}'\n"
                      f"- System prediction (MMIF) location: {self._pred_loc}'\n")
@@ -303,6 +329,10 @@ class ClamsAAPBEvaluationTask(ABC):
             report.write("\n```\n")
         else:
             report.write("No results available in a serializable format.\n")
+        if self._do_sbs:
+            report.write(f"\n## Side-by-side view\n")
+            # TODO (krim @ 3/23/25): add side-by-side view of the results
+            report.write(self.write_side_by_side_view())
         # TODO (krim @ 3/23/25): and continue templating the report
         return report
     
