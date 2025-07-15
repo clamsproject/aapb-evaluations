@@ -1,3 +1,5 @@
+import base64
+import collections
 from pathlib import Path
 from typing import Any, Union, Tuple, Dict
 
@@ -34,11 +36,23 @@ class AutomaticSpeechRecognitionEvaluator(ClamsAAPBEvaluationTask):
     def __init__(self, batchname: str, **kwargs):
 
         super().__init__(batchname, **kwargs)
+        self._source_images_loc = kwargs.get('source_images_loc')
+        if self._source_images_loc is not None:
+            self._source_image_timestamps = collections.defaultdict(dict)
+            for source_image in Path(self._source_images_loc).glob('*.jpg'):
+                # source image files are named as <guid>_<totalms>_<targetms>_<foundms>.jpg
+                parts = source_image.stem.split('_')
+                if len(parts) < 3:
+                    continue
+                self._source_image_timestamps[parts[0]][int(parts[2])] = source_image.name
         if self._do_sbs:
             # empty dataframe for side-by-side comparison
             self._sbs = pd.DataFrame(
                 columns=['guid', 'at', 'gold', 'pred', 'cased_cer', 'uncased_cer']
             )
+            if self._source_images_loc:
+                # add source image column
+                self._sbs['source_image'] = None
 
     def _read_gold(self, gold_file: Union[str, Path], **kwargs) -> Dict[Tuple[int, int], str]:
         """
@@ -68,9 +82,7 @@ class AutomaticSpeechRecognitionEvaluator(ClamsAAPBEvaluationTask):
             raise ValueError(f"Gold file {gold_file} must have either 'at' column or 'start' and 'end' columns.")
         # then "un"-escape newlines
         df['text-transcript'] = df['text-transcript'].apply(lambda x: x.replace('\\n', '\n'))
-        # convert to dict by adding some millisecond threshold
-        threshold = kwargs.get('threshold', 1)
-        return {(row['start']-threshold, row['end']+threshold): row['text-transcript'] for _, row in df.iterrows()}
+        return {(row['start'], row['end']): row['text-transcript'] for _, row in df.iterrows()}
 
     def _read_pred(self, pred_file: Union[str, Path], gold, **kwargs) -> Any:
         """
@@ -117,13 +129,17 @@ class AutomaticSpeechRecognitionEvaluator(ClamsAAPBEvaluationTask):
         # keys of the gold dict is (s, e) range, extract and sort by the start
         gold_ranges = sorted(list(gold.keys()), key=lambda x: x[0])
         for i, (pred_tp, pred_str) in enumerate(pred.items()):
-            range_idx = find_range_index(gold_ranges, pred_tp)
+            # adding some millisecond threshold
+            range_idx = find_range_index(gold_ranges, pred_tp, threshold=1)
             if range_idx == -1:
                 # this means the prediction is outside of any gold range
                 # TODO (krim @ 5/1/25): how to handle this?
                 continue
             # otherwise, we have a valid range
-            gold_str = gold[gold_ranges[range_idx]]
+            gold_range = gold_ranges[range_idx]
+            gold_ms = gold_range[0]  # start of the range
+            # print('===', guid, gold_ms)
+            gold_str = gold[gold_range]
             # print(f'comparing\n---\n{pred_str}\n===\n{gold_str}\n---')
             if not pred_str or not gold_str:
                 cs_cers = 1.0  # if either is empty, we assume 100% error
@@ -134,7 +150,22 @@ class AutomaticSpeechRecognitionEvaluator(ClamsAAPBEvaluationTask):
             # print(f'CER cased: {cs_cers}, uncased: {ci_cers}\n\n')
             if self._do_sbs:
                 # add to side-by-side comparison
-                self._sbs.loc[len(self._sbs)] = [f'{guid} ({len(gold)} rows)', pred_tp, gold_str, pred_str, cs_cers, ci_cers]
+                row = [f'{guid} ({len(gold)} rows)', pred_tp, gold_str, pred_str, cs_cers, ci_cers]
+                if self._source_images_loc:
+                    # find the source image
+                    img_tss = sorted(list(self._source_image_timestamps[guid].keys()))
+                    img_ts_ranges = [(ts, ts + 1) for ts in img_tss]
+                    img_ts_idx = find_range_index(img_ts_ranges, gold_ms, threshold=3)
+                    if img_ts_idx == -1:
+                        # if we could not find the image, just add an empty string
+                        row.append('')
+                    else:
+                        source_image_fname = self._source_image_timestamps[guid][img_tss[img_ts_idx]]
+                        source_image = Path(self._source_images_loc) / source_image_fname
+                        # encode with base64 string for html embedding
+                        b64str = base64.b64encode(open(source_image, 'rb').read()).decode('utf-8')
+                        row.append(f'<img src="data:image/jpeg;base64,{b64str}" alt="{gold_ms} milliseconds in {guid} video"/>')
+                self._sbs.loc[len(self._sbs)] = row
             cased_cers.append(cs_cers)
             uncased_cers.append(ci_cers)
         if len(cased_cers) == 0:
@@ -183,7 +214,7 @@ if __name__ == "__main__":
                         help='include side-by-side comparison of text pieces in the report for visualization', )
     args = parser.parse_args()
 
-    evaluator = AutomaticSpeechRecognitionEvaluator(batchname=args.batchname, gold_loc=args.golds, pred_loc=args.preds, sbs=args.sbs)
+    evaluator = AutomaticSpeechRecognitionEvaluator(batchname=args.batchname, gold_loc=args.golds, pred_loc=args.preds, sbs=args.sbs, source_images_loc=args.source_directory)
     evaluator.calculate_metrics(by_guid=True)
     report = evaluator.write_report()
     args.export.write(report.getvalue())
