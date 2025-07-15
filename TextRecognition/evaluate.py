@@ -87,23 +87,25 @@ class AutomaticSpeechRecognitionEvaluator(ClamsAAPBEvaluationTask):
         mmif_str = f.read()
         f.close()
         data = Mmif(mmif_str)
-        cand_views = data.get_all_views_contain(
-            DocumentTypes.TextDocument, AnnotationTypes.Alignment, AnnotationTypes.BoundingBox
-        )
-        if not cand_views:
-            raise Exception("No TR view found in the MMIF file. A TR view should contain BoundingBox, TextDocument, and Alignment annotations")
-        # pick the last 
-        tr_view = cand_views[-1]
         # NOTE that we're also dealing with video scenario
         fps = next(doc.get_property('fps') for doc in data.documents if doc.get_property('fps'))
         preds = {}
-        for td in tr_view.get_annotations(DocumentTypes.TextDocument):
-            for ali in td.get_all_aligned():
-                # TD is aligned directly to the representative frame, 
-                # while sub-structures (paragraph, sents, tokens) can be aligned to individual bounding boxes
-                if ali.at_type == AnnotationTypes.TimePoint:
-                    in_unit = 'milliseconds' if 'timeunit' not in ali.properties else ali.get_property('timeunit')
-                    preds[tuh.convert(data.get_start(ali), in_unit, 'milliseconds', fps)] = td.text_value
+        # start from the end 
+        found_tr_view = False
+        for td_view in reversed(data.get_all_views_contain(DocumentTypes.TextDocument)):
+            if found_tr_view:
+                # we already found the TR view, so we can stop
+                break
+            for td in td_view.get_annotations(DocumentTypes.TextDocument):
+                for ali in td.get_all_aligned():
+                    # TD is aligned directly to the representative frame, 
+                    # while sub-structures (paragraph, sents, tokens) can be aligned to individual bounding boxes
+                    if ali.at_type == AnnotationTypes.TimePoint:
+                        found_tr_view = True
+                        in_unit = 'milliseconds' if 'timeunit' not in ali.properties else ali.get_property('timeunit')
+                        preds[tuh.convert(data.get_start(ali), in_unit, 'milliseconds', fps)] = td.text_value
+        if not preds:
+            raise Exception("No TR view found in the MMIF file. A TR view should contain TextDocument with Alignment to TimePoint annotation.")
         return preds, gold
 
     def _compare_pair(self, guid: str, gold: Any, pred: Any) -> Any:
@@ -123,8 +125,12 @@ class AutomaticSpeechRecognitionEvaluator(ClamsAAPBEvaluationTask):
             # otherwise, we have a valid range
             gold_str = gold[gold_ranges[range_idx]]
             # print(f'comparing\n---\n{pred_str}\n===\n{gold_str}\n---')
-            cs_cers = cer(pred_str, gold_str, exact_case=True)
-            ci_cers = cer(pred_str, gold_str, exact_case=False)
+            if not pred_str or not gold_str:
+                cs_cers = 1.0  # if either is empty, we assume 100% error
+                ci_cers = 1.0
+            else:
+                cs_cers = cer(pred_str, gold_str, exact_case=True)
+                ci_cers = cer(pred_str, gold_str, exact_case=False)
             # print(f'CER cased: {cs_cers}, uncased: {ci_cers}\n\n')
             if self._do_sbs:
                 # add to side-by-side comparison
