@@ -12,7 +12,10 @@ import jiwer
 def casing_text(text, ignore_case):
     """Includes any text preprocessing we would like to add, currently only casing"""
     if ignore_case:
-        text = text.upper()
+        if isinstance(text, list):
+            text = [t.upper() for t in text]
+        else:
+            text = text.upper()
     return text
 
 
