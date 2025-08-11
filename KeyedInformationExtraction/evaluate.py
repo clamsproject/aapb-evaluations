@@ -7,39 +7,38 @@ import json
 from mmif import AnnotationTypes, DocumentTypes, Mmif
 from mmif.utils import timeunit_helper as tuh
 
-from common import ClamsAAPBEvaluationTask
 from common.helpers import find_range_index
 from common.metrics import cer
+from TextRecognition.evaluate import TextRecognitionEvaluator
 
 
-class AutomaticSpeechRecognitionEvaluator(ClamsAAPBEvaluationTask):
+class KeyedInformationExtractionEvaluator(TextRecognitionEvaluator):
     """
-    Evaluating Text Recognition (a.k.a OCR) results, using CER (Character 
-    Error Rate) metric. CER calculates the accuracy on the character level,
-    using edit distance algorithm. Namely, CER tells "how many edits" it 
-    takes to correct the predicted result into the gold standard text. That 
-    said, note that 
+    Evaluating Keyed Information Extraction (KIE) results, a task that extends
+    general text recognition (OCR) by constructing structured mappings from
+    predefined category sets to portions of recognized text. Specifically,
+    KIE extends basic OCR by adding semantic categorization - instead of just
+    extracting raw text, the system must organize recognized content into
+    meaningful, predefined categories. This structured approach enables
+    downstream applications to directly access specific information types.
 
-    1. For CER, the lower the value, the better the performance.
-    1. CER can be more that 100%, although it sounds strange. 
-    
-    (When this evaluator could not find any matching pairs between a gold 
-    and a prediction, it will return -1 for CER values.)
-    (When this evaluator could not find any predictions at all for a GUID, 
-    it will return False for CER values.)
+    Example: Chyron Text Processing
+    From chyron images, KIE can extract a three-key dictionary:
+    - `name-as-written`: Person's name exactly as displayed in source
+    - `name-normalized`: Standardized name format
+    - `attributes`: Role/title/location information
 
-    General information on TR evaluation can be found https://en.wikipedia.org/wiki/Optical_character_recognition#Accuracy
-    And more details on the edit distance (Levenshtein algorithm) can be found https://en.wikipedia.org/wiki/Levenshtein_distance
+    For valid KIE evaluation, both gold standard annotations and system
+    predictions must use identical category schemas. Mismatched categories
+    will result in invalid comparisons and unreliable metrics. Performance
+    is measured using Character Error Rate calculated separately
+    for each information category, as reported for both case-sensitive
+    and case-insensitive variants, and overall averaged across all categories.
     """
     
     def __init__(self, batchname: str, **kwargs):
 
         super().__init__(batchname, **kwargs)
-        if self._do_sbs:
-            # empty dataframe for side-by-side comparison
-            self._sbs = pd.DataFrame(
-                columns=['guid', 'at', 'gold', 'pred', 'cased_cer', 'uncased_cer']
-            )
 
     def _read_gold(self, gold_file: Union[str, Path], **kwargs) -> Dict[Tuple[int, int], Dict[str, Any]]:
         """
@@ -50,23 +49,8 @@ class AutomaticSpeechRecognitionEvaluator(ClamsAAPBEvaluationTask):
         :return: a dict from (start, end) tuple to text, where start (inclusive) and end (exclusive) are in milliseconds. For timepoint-wise annotation (with `at` column in the gold data), start will be the `at` value, end will be `at`+1. 
         
         """
-        if str(gold_file).endswith('.csv'):
-            df = pd.read_csv(gold_file) 
-        elif str(gold_file).endswith('.json'):
-            df = pd.read_json(gold_file)
-        # if `at` column? timepoint annotation
-        if 'at' in df.columns:
-            # rename to start 
-            df = df.rename(columns={'at': 'start'})
-            # convert value to ms using tuh.convert 
-            df['start'] = df['start'].apply(lambda x: tuh.convert(x, 'iso', 'milliseconds', 1))
-            # add end column, value is start + 1 
-            df['end'] = df['start'] + 1
-        elif 'start' in df.columns and 'end' in df.columns:
-            df['start'] = df['start'].apply(lambda x: tuh.convert(x, 'iso', 'milliseconds', 1))
-            df['end'] = df['end'].apply(lambda x: tuh.convert(x, 'iso', 'milliseconds', 1))
-        else:
-            raise ValueError(f"Gold file {gold_file} must have either 'at' column or 'start' and 'end' columns.")
+        df = super()._get_gold_data(gold_file)
+
         # convert to dict by adding some millisecond threshold
         threshold = kwargs.get('threshold', 1)
         return {(row['start']-threshold, row['end']+threshold): row['keyed-information'] for _, row in df.iterrows()}
@@ -183,30 +167,38 @@ class AutomaticSpeechRecognitionEvaluator(ClamsAAPBEvaluationTask):
                 ress.append([guid] + list(results))
         df = pd.DataFrame(ress, columns=cols)
         # then add the average row, ignoring negative values
-        # TODO (ledibr @ 7/21/25): sort out averages
-        # df.loc[len(df)] = ['Average'] + [df[df[col] > 0][col].mean() for col in df.columns[1:]]
+        df = self._average_results(df)
         self._results = df.to_csv(index=False, sep=',', header=True)
+
+    def _average_results(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Averages lists within each dataframe column by index.
+
+        :return: the original dataframe with a new averaged results row at the end.
+        """
+        average_lists = []
+
+        for col in df.columns[1:]:
+            col_df = pd.DataFrame(df[col].tolist())
+            col_avg = [col_df[col_df[c] > 0][c].mean() for c in col_df.columns]
+            average_lists.append(col_avg)
+
+        df.loc[len(df)] = ['Average'] + average_lists
+
+        return df
     
     def write_side_by_side_view(self):
-        if self._do_sbs:
-            def replace_newlines_with_br(text):
-                if isinstance(text, str):
-                    return text.replace('\n', '<br>')
-                return text
-            for col in ['gold', 'pred']:
-                self._sbs[col] = self._sbs[col].apply(replace_newlines_with_br)
-            return self._sbs.to_html(index=False, escape=False,
-                                     table_id='sbs-table', 
-                                     classes='table table-striped')
+
+        super().write_side_by_side_view()
 
 
 if __name__ == "__main__":
-    parser = AutomaticSpeechRecognitionEvaluator.prep_argparser()
+    parser = KeyedInformationExtractionEvaluator.prep_argparser()
     parser.add_argument('-s', '--sbs', action='store_true',
                         help='include side-by-side comparison of text pieces in the report for visualization', )
     args = parser.parse_args()
 
-    evaluator = AutomaticSpeechRecognitionEvaluator(batchname=args.batchname, gold_loc=args.golds, pred_loc=args.preds, sbs=args.sbs)
+    evaluator = KeyedInformationExtractionEvaluator(batchname=args.batchname, gold_loc=args.golds, pred_loc=args.preds, sbs=args.sbs)
     evaluator.calculate_metrics(by_guid=True)
     report = evaluator.write_report()
     args.export.write(report.getvalue())

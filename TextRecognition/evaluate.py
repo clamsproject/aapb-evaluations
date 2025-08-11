@@ -13,7 +13,7 @@ from common.helpers import find_range_index
 from common.metrics import cer
 
 
-class AutomaticSpeechRecognitionEvaluator(ClamsAAPBEvaluationTask):
+class TextRecognitionEvaluator(ClamsAAPBEvaluationTask):
     """
     Evaluating Text Recognition (a.k.a OCR) results, using CER (Character 
     Error Rate) metric. CER calculates the accuracy on the character level,
@@ -63,26 +63,38 @@ class AutomaticSpeechRecognitionEvaluator(ClamsAAPBEvaluationTask):
         :return: a dict from (start, end) tuple to text, where start (inclusive) and end (exclusive) are in milliseconds. For timepoint-wise annotation (with `at` column in the gold data), start will be the `at` value, end will be `at`+1. 
         
         """
+        df = self._get_gold_data(gold_file)
+
+        # then "un"-escape newlines
+        df['text-transcript'] = df['text-transcript'].apply(lambda x: x.replace('\\n', '\n'))
+        return {(row['start'], row['end']): row['text-transcript'] for _, row in df.iterrows()}
+
+    def _get_gold_data(self, gold_file: Union[str, Path]) -> pd.DataFrame:
+        """
+        Reads csv data from timepoint-/timeframe-wise gold annotation file and
+
+        :return: a pandas.DataFrame containing gold data where start (inclusive) and end (exclusive) are in milliseconds.
+
+        """
         if str(gold_file).endswith('.csv'):
-            df = pd.read_csv(gold_file) 
+            df = pd.read_csv(gold_file)
         elif str(gold_file).endswith('.json'):
             df = pd.read_json(gold_file)
         # if `at` column? timepoint annotation
         if 'at' in df.columns:
-            # rename to start 
+            # rename to start
             df = df.rename(columns={'at': 'start'})
-            # convert value to ms using tuh.convert 
+            # convert value to ms using tuh.convert
             df['start'] = df['start'].apply(lambda x: tuh.convert(x, 'iso', 'milliseconds', 1))
-            # add end column, value is start + 1 
+            # add end column, value is start + 1
             df['end'] = df['start'] + 1
         elif 'start' in df.columns and 'end' in df.columns:
             df['start'] = df['start'].apply(lambda x: tuh.convert(x, 'iso', 'milliseconds', 1))
             df['end'] = df['end'].apply(lambda x: tuh.convert(x, 'iso', 'milliseconds', 1))
         else:
             raise ValueError(f"Gold file {gold_file} must have either 'at' column or 'start' and 'end' columns.")
-        # then "un"-escape newlines
-        df['text-transcript'] = df['text-transcript'].apply(lambda x: x.replace('\\n', '\n'))
-        return {(row['start'], row['end']): row['text-transcript'] for _, row in df.iterrows()}
+
+        return df
 
     def _read_pred(self, pred_file: Union[str, Path], gold, **kwargs) -> Any:
         """
@@ -209,12 +221,12 @@ class AutomaticSpeechRecognitionEvaluator(ClamsAAPBEvaluationTask):
 
 
 if __name__ == "__main__":
-    parser = AutomaticSpeechRecognitionEvaluator.prep_argparser()
+    parser = TextRecognitionEvaluator.prep_argparser()
     parser.add_argument('-s', '--sbs', action='store_true',
                         help='include side-by-side comparison of text pieces in the report for visualization', )
     args = parser.parse_args()
 
-    evaluator = AutomaticSpeechRecognitionEvaluator(batchname=args.batchname, gold_loc=args.golds, pred_loc=args.preds, sbs=args.sbs, source_images_loc=args.source_directory)
+    evaluator = TextRecognitionEvaluator(batchname=args.batchname, gold_loc=args.golds, pred_loc=args.preds, sbs=args.sbs, source_images_loc=args.source_directory)
     evaluator.calculate_metrics(by_guid=True)
     report = evaluator.write_report()
     args.export.write(report.getvalue())
