@@ -135,18 +135,21 @@ class ClamsAAPBEvaluationTask(ABC):
 
     def _get_gold_files(self, gold_uri: str) -> Iterable[Union[str, Path]]:
         """
-        Read files under the gold "directory". If the directory location 
-        is given as a URL (http, https, ftp, etc.), download the files 
-        under the remote directory to a temporary location and return the
-        list of file paths.
+        Read files under the gold directory. For now, the only way to pass gold files is via local directories.
         """
+        # Previously: If the directory location is given as a URL (http, https, ftp, etc.),
+        # download the files under the remote directory to a temporary location
+        # and return the list of file paths.
         # a URL to a directory containing gold files look like this 
         # "https://github.com/clamsproject/aapb-annotations/tree/main/newshour-transcript-sync/221101-aapb-collaboration-21"
         # TODO (krim @ 3/24/25): should we support falling back to LOCAL_AAPB_ANNOTATIONS var for no internet connection?
-        # even though this method already supports `file://` scheme? 
-        if gold_uri.startswith(('http://', 'https://')):  # maybe ftp:// too?
-            gold_dir = Path(goldretriever.download_golds(gold_uri))
-        elif gold_uri.startswith('file://'):
+        # even though this method already supports `file://` scheme?
+
+        # goldretriever functionality disabled until gold annotation repo is made fully available
+        # if gold_uri.startswith(('http://', 'https://')):  # maybe ftp:// too?
+        #     gold_dir = Path(goldretriever.download_golds(gold_uri))
+        # as with _get_pred_files, the system will throw an error if it's anything besides a valid path
+        if gold_uri.startswith('file://'):
             gold_dir = Path(gold_uri.replace('file://', ''))
         else:
             gold_dir = Path(gold_uri)

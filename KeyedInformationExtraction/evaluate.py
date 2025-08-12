@@ -179,7 +179,7 @@ class KeyedInformationExtractionEvaluator(TextRecognitionEvaluator):
         average_lists = []
 
         for col in df.columns[1:]:
-            col_df = pd.DataFrame(df[col].tolist())
+            col_df = pd.DataFrame(df[df[col] != False][col].tolist())
             col_avg = [col_df[col_df[c] > 0][c].mean() for c in col_df.columns]
             average_lists.append(col_avg)
 
