@@ -35,10 +35,6 @@ class KeyedInformationExtractionEvaluator(TextRecognitionEvaluator):
     for each information category, as reported for both case-sensitive
     and case-insensitive variants, and overall averaged across all categories.
     """
-    
-    def __init__(self, batchname: str, **kwargs):
-
-        super().__init__(batchname, **kwargs)
 
     def _read_gold(self, gold_file: Union[str, Path], **kwargs) -> Dict[Tuple[int, int], Dict[str, Any]]:
         """
@@ -186,10 +182,6 @@ class KeyedInformationExtractionEvaluator(TextRecognitionEvaluator):
         df.loc[len(df)] = ['Average'] + average_lists
 
         return df
-    
-    def write_side_by_side_view(self):
-
-        super().write_side_by_side_view()
 
 
 if __name__ == "__main__":
