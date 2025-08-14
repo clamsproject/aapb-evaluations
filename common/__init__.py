@@ -23,9 +23,10 @@ import sys
 import warnings
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Union, Iterable, Any, Tuple, Optional
+from typing import Union, Iterable, Any, Tuple, Optional, List
 
 from clams_utils.aapb import guidhandler, goldretriever
+from mmif import Mmif
 
 logging.basicConfig(
     level=logging.INFO,
@@ -34,11 +35,11 @@ logging.basicConfig(
 
 # this might be too "magic", but as a fallback option for no internet connection
 # read local directory if LOCAL_AAPB_ANNOTATIONS is set
-local_aaapb_annotations = None
+local_aapb_annotations = None
 if 'LOCAL_AAPB_ANNOTATIONS' in os.environ:
-    local_aaapb_annotations = Path(os.environ['LOCAL_AAPB_ANNOTATIONS'])
+    local_aapb_annotations = Path(os.environ['LOCAL_AAPB_ANNOTATIONS'])
     # validate that it exists and a dir 
-    if not local_aaapb_annotations.is_dir():
+    if not local_aapb_annotations.is_dir():
         raise FileNotFoundError(
             f"Cannot access `aapb-annotations` locally. If you intend to use online files, unset the `LOCAL_AAPB_ANNOTATIONS` environment variable.")
 
@@ -64,6 +65,7 @@ class ClamsAAPBEvaluationTask(ABC):
         self._pred_loc = pred_loc
         self._get_gold_files(gold_loc)
         self._get_pred_files(pred_loc)
+        self.specs = {}  # TODO (krim @ 8/14/25): placeholder for pipeline specs for the evaluation task
 
         self._results = None
         # variable to store scores for each guid, and overall scores under '*' key
@@ -72,7 +74,6 @@ class ClamsAAPBEvaluationTask(ABC):
         self._do_sbs = kwargs.get('sbs', False)
         # use a separate variable to store side-by-side results, if needed
         # then use `self._write_side_by_side_view` to "pretty-print" the results
-        
 
     @property
     def taskname(self) -> str:
@@ -101,7 +102,7 @@ class ClamsAAPBEvaluationTask(ABC):
         Batch names are available in aapb-annotations repo. 
         """
         if 'LOCAL_AAPB_ANNOTATIONS' in os.environ:
-            all_batches = local_aaapb_annotations / 'batches'
+            all_batches = local_aapb_annotations / 'batches'
         else:
             all_batches = Path(goldretriever.download_golds(
                 f'https://github.com/clamsproject/aapb-annotations/tree/{aapb_ann_commit}/batches'))
@@ -114,6 +115,7 @@ class ClamsAAPBEvaluationTask(ABC):
                 guid = line.strip()
                 bisect.insort(guids, guid)
         for guid in guids:
+            # initialize the pairs with None for gold and pred
             self.pairs[guid] = [None, None]
 
     @classmethod
@@ -123,13 +125,13 @@ class ClamsAAPBEvaluationTask(ABC):
         arguments are defined in this super class. 
         """
         parser = argparse.ArgumentParser(description=cls.__doc__)
-        parser.add_argument('-p', '--preds', type=str, help='directory containing prediction files (MMIF)')
-        parser.add_argument('-g', '--golds', type=str, help='directory containing gold files (non-MMIF)')
+        parser.add_argument('-p', '--preds', type=str, required=True, help='directory containing prediction files (MMIF)')
+        parser.add_argument('-g', '--golds', type=str, required=True, help='directory containing gold files (non-MMIF)')
         parser.add_argument('-e', '--export', help='filename to export the results/report (default to stdout)',
                             type=argparse.FileType('w'), nargs='?', default=sys.stdout)
         parser.add_argument('-b', '--batchname', type=str, help='Batch name (set of AAPB GUIDs) for the task')
         parser.add_argument('--source-directory', nargs='?',
-                            help="directory that contains original source files without annotations. Only use when information only in the source is needed for calculating evaluation metrics.",
+                            help='directory that contains original source files without annotations. Only use when information only in the source is needed for calculating evaluation metrics.',
                             default=None)
         return parser
 
@@ -163,9 +165,13 @@ class ClamsAAPBEvaluationTask(ABC):
             if not f.is_file():
                 continue
             guid = guidhandler.get_aapb_guid_from(f.name)
-            if set_targets:
+            if guid is None:
+                self.logger.warning(f"Skipping file {f.name} as it does not have a valid AAPB GUID.")
+            elif set_targets:
+                # set "setting" mode, each entry needs to be initialized from [None, None]
                 self.pairs[guid] = [f, None]
             else:
+                # if not in setting mode, ignore GUID that's not already "set"
                 if guid in self.pairs:
                     self.pairs[guid][0] = f
             
@@ -191,6 +197,7 @@ class ClamsAAPBEvaluationTask(ABC):
                              "prediction files. Use a batch name or "
                              "gold_dir to set the target GUIDs.")
         
+
         matched = 0
         for f in pred_dir.iterdir():
             if not f.is_file():
@@ -296,6 +303,7 @@ class ClamsAAPBEvaluationTask(ABC):
         """
         raise NotImplementedError
     
+
     @abstractmethod
     def write_side_by_side_view(self):
         """
@@ -338,4 +346,3 @@ class ClamsAAPBEvaluationTask(ABC):
             report.write(self.write_side_by_side_view())
         # TODO (krim @ 3/23/25): and continue templating the report
         return report
-    
