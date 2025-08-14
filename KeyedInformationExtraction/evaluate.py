@@ -1,15 +1,15 @@
+import collections
+import json
 from pathlib import Path
 from typing import Any, Union, Tuple, Dict
 
 import numpy
 import pandas as pd
-import json
 from mmif import AnnotationTypes, DocumentTypes, Mmif
 from mmif.utils import timeunit_helper as tuh
 
-from common.helpers import find_range_index
-from common.metrics import cer
 from TextRecognition.evaluate import TextRecognitionEvaluator
+from common.metrics import cer
 
 
 class KeyedInformationExtractionEvaluator(TextRecognitionEvaluator):
@@ -47,22 +47,9 @@ class KeyedInformationExtractionEvaluator(TextRecognitionEvaluator):
         """
         df = super()._get_gold_data(gold_file)
 
-        # convert to dict by adding some millisecond threshold
-        threshold = kwargs.get('threshold', 1)
-        return {(row['start']-threshold, row['end']+threshold): row['keyed-information'] for _, row in df.iterrows()}
+        return {(row['start'], row['end']): row['keyed-information'] for _, row in df.iterrows()}
 
     def _read_pred(self, pred_file: Union[str, Path], gold, **kwargs) -> Any:
-        """
-        Assuming a video OCR scenario where 
-        1. TR ran on a specific time point (extracted still image)
-        2. TR results are stored as `TextDocument` (and ignore all other "sub" types such as `Paragraph`, `Sentence`, `Token`)
-        3. TR results are `Aligned` to `BoundingBox` annotations (and bbox has temporal information)
-        4. TR results have been processed by the HCU application
-        
-        # TODO (krim @ 5/1/25): image OCR scenario for the future?
-        
-        :return: (a dict from int (millisecond) to TR result text, gold as-is)
-        """
         f = open(pred_file, 'r')
         mmif_str = f.read()
         f.close()
@@ -95,53 +82,53 @@ class KeyedInformationExtractionEvaluator(TextRecognitionEvaluator):
                     preds[timestamp] = hcu_texts[td.long_id]
         return preds, gold
 
-    def _compare_pair(self, guid: str, gold: Any, pred: Any) -> Any:
+    @staticmethod
+    def _aggregate_cers(cased_cers, uncased_cers):
         """
-        returns WER scores one for cased and another for uncased (ignore case)
+        Aggregates the results from cased and uncased dictionaries.
+        Returns two dicts (case sensitive and case insensitive) with 
+        three float scores (for each key)
         """
-        cased_cers = {'attributes': [], 'name-as-written': [], 'name-normalized': []}
-        uncased_cers = {'attributes': [], 'name-as-written': [], 'name-normalized': []}
-        # keys of the gold dict is (s, e) range, extract and sort by the start
-        gold_ranges = sorted(list(gold.keys()), key=lambda x: x[0])
-        for i, (pred_tp, pred_str) in enumerate(pred.items()):
-            range_idx = find_range_index(gold_ranges, pred_tp)
-            if range_idx == -1:
-                # this means the prediction is outside of any gold range
-                # TODO (krim @ 5/1/25): how to handle this?
-                continue
-            # otherwise, we have a valid range
-            gold_str = gold[gold_ranges[range_idx]]
-            # store original attributes dict for ease of printing side by side
-            pred_attr = pred_str['attributes']
-            gold_attr = gold_str['attributes']
-            # then join for ease of computing CER
-            pred_str['attributes'] = ''.join(pred_str['attributes'])
-            gold_str['attributes'] = ''.join(gold_str['attributes'])
-            # print(f'comparing\n---\n{pred_str}\n===\n{gold_str}\n---')
-            cs_cers = {}
-            ci_cers = {}
-            for k in pred_str:
-                if (len(gold_str[k]) == 0 and len(pred_str[k]) > 0) or (len(pred_str[k]) == 0 and len(gold_str[k]) > 0):
-                    cs_cers[k] = 1.0
-                    ci_cers[k] = 1.0
-                else:
-                    cs_cers[k] = cer(pred_str[k], gold_str[k], exact_case=True)
-                    ci_cers[k] = cer(pred_str[k], gold_str[k], exact_case=False)
-            # print(f'CER cased: {cs_cers}, uncased: {ci_cers}\n\n')
-            if self._do_sbs:
-                # add to side-by-side comparison
-                pred_str['attributes'] = pred_attr
-                gold_str['attributes'] = gold_attr
-                self._sbs.loc[len(self._sbs)] = [f'{guid} ({len(gold)} rows)', pred_tp, gold_str, pred_str, cs_cers, ci_cers]
-            for k in cs_cers:
-                cased_cers[k].append(cs_cers[k])
-                uncased_cers[k].append(ci_cers[k])
-        if len(cased_cers['attributes']) == 0:
-            return -1, -1
-        cased_means = [numpy.mean(cased_cers[key]) for key in cased_cers]
-        uncased_means = [numpy.mean(uncased_cers[key]) for key in uncased_cers]
-
+        cased_score_collection = collections.defaultdict(list)
+        uncased_score_collection = collections.defaultdict(list)
+        for cer in cased_cers:
+            for key, score in cer.items():
+                cased_score_collection[key].append(score)
+        for cer in uncased_cers:
+            for key, score in cer.items():
+                uncased_score_collection[key].append(score)
+        
+        cased_means = {key: float(numpy.mean(scores)) if scores else 0.0 for key, scores in cased_score_collection.items()}
+        uncased_means = {key: float(numpy.mean(scores)) if scores else 0.0 for key, scores in uncased_score_collection.items()}
+        
         return cased_means, uncased_means
+
+    @staticmethod
+    def _compute_cer(gold_datum, pred_datum):
+        """
+        Computes CER score for each key in the gold and pred dictionaries.
+        Returns CER scores under the same keys.
+        """
+        # validate that both gold and pred are dictionaries with the same keys
+        if not isinstance(gold_datum, dict) or not isinstance(pred_datum, dict):
+            raise ValueError("Both gold and pred must be dictionaries with the same keys.")
+        if set(gold_datum.keys()) != set(pred_datum.keys()):
+            raise ValueError("Gold and pred dictionaries must have the same keys.")
+        cased_cers = {}
+        uncased_cers = {}
+        for key in gold_datum:
+            gold_value = gold_datum[key]
+            pred_value = pred_datum[key]
+            gold_value = ''.join(gold_value) if isinstance(gold_value, list) else gold_value
+            pred_value = ''.join(pred_value) if isinstance(pred_value, list) else pred_value
+            if isinstance(gold_value, str) and isinstance(pred_value, str):
+                if (len(gold_value) == 0 and len(pred_value) > 0) or (len(pred_value) == 0 and len(gold_value) > 0):
+                    cased_cers[key] = 1.0
+                    uncased_cers[key] = 1.0
+                else:
+                    cased_cers[key] = cer(pred_value, gold_value, exact_case=True)
+                    uncased_cers[key] = cer(pred_value, gold_value, exact_case=False)
+        return cased_cers, uncased_cers
 
     def _compare_all(self, golds, preds) -> Any:
         """
@@ -150,38 +137,15 @@ class KeyedInformationExtractionEvaluator(TextRecognitionEvaluator):
         """
         raise NotImplementedError("Comparing all golds and preds is not implemented. ")
 
-    def _finalize_results(self):
-        cols = 'GUID mean-CER-cased mean-CER-uncased'.split()
-
-        # create a DataFrame from the calculations
-        ress = []
-        for guid, results in self._calculations.items():
-            if not results:
-                # when pred file was not properly read, we set the results to False
-                ress.append([guid, False, False])
-            else:
-                ress.append([guid] + list(results))
-        df = pd.DataFrame(ress, columns=cols)
-        # then add the average row, ignoring negative values
-        df = self._average_results(df)
-        self._results = df.to_csv(index=False, sep=',', header=True)
-
-    def _average_results(self, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Averages lists within each dataframe column by index.
-
-        :return: the original dataframe with a new averaged results row at the end.
-        """
+    @staticmethod
+    def _average_results_over_guids(results: pd.DataFrame):
         average_lists = []
 
-        for col in df.columns[1:]:
-            col_df = pd.DataFrame(df[df[col] != False][col].tolist())
+        for col in results.columns[1:]:
+            col_df = pd.DataFrame(results[results[col] != False][col].tolist())
             col_avg = [col_df[col_df[c] > 0][c].mean() for c in col_df.columns]
             average_lists.append(col_avg)
-
-        df.loc[len(df)] = ['Average'] + average_lists
-
-        return df
+        return ['Average'] + average_lists
 
 
 if __name__ == "__main__":

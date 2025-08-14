@@ -32,6 +32,7 @@ class TextRecognitionEvaluator(ClamsAAPBEvaluationTask):
     General information on TR evaluation can be found https://en.wikipedia.org/wiki/Optical_character_recognition#Accuracy
     And more details on the edit distance (Levenshtein algorithm) can be found https://en.wikipedia.org/wiki/Levenshtein_distance
     """
+    TIMING_MS_THRESHOLD = 10  # threshold for matching gold and pred time points, in milliseconds
     
     def __init__(self, batchname: str, **kwargs):
 
@@ -69,7 +70,8 @@ class TextRecognitionEvaluator(ClamsAAPBEvaluationTask):
         df['text-transcript'] = df['text-transcript'].apply(lambda x: x.replace('\\n', '\n'))
         return {(row['start'], row['end']): row['text-transcript'] for _, row in df.iterrows()}
 
-    def _get_gold_data(self, gold_file: Union[str, Path]) -> pd.DataFrame:
+    @staticmethod
+    def _get_gold_data(gold_file: Union[str, Path]) -> pd.DataFrame:
         """
         Reads csv data from timepoint-/timeframe-wise gold annotation file and
 
@@ -140,9 +142,8 @@ class TextRecognitionEvaluator(ClamsAAPBEvaluationTask):
         uncased_cers = []
         # keys of the gold dict is (s, e) range, extract and sort by the start
         gold_ranges = sorted(list(gold.keys()), key=lambda x: x[0])
-        for i, (pred_tp, pred_str) in enumerate(pred.items()):
-            # adding some millisecond threshold
-            range_idx = find_range_index(gold_ranges, pred_tp, threshold=1)
+        for i, (pred_tp, pred_datum) in enumerate(pred.items()):
+            range_idx = find_range_index(gold_ranges, pred_tp, threshold=self.TIMING_MS_THRESHOLD)
             if range_idx == -1:
                 # this means the prediction is outside of any gold range
                 # TODO (krim @ 5/1/25): how to handle this?
@@ -151,23 +152,18 @@ class TextRecognitionEvaluator(ClamsAAPBEvaluationTask):
             gold_range = gold_ranges[range_idx]
             gold_ms = gold_range[0]  # start of the range
             # print('===', guid, gold_ms)
-            gold_str = gold[gold_range]
+            gold_datum = gold[gold_range]
             # print(f'comparing\n---\n{pred_str}\n===\n{gold_str}\n---')
-            if not pred_str or not gold_str:
-                cs_cers = 1.0  # if either is empty, we assume 100% error
-                ci_cers = 1.0
-            else:
-                cs_cers = cer(pred_str, gold_str, exact_case=True)
-                ci_cers = cer(pred_str, gold_str, exact_case=False)
+            ci_cer, cs_cer = self._compute_cer(gold_datum, pred_datum)
             # print(f'CER cased: {cs_cers}, uncased: {ci_cers}\n\n')
             if self._do_sbs:
                 # add to side-by-side comparison
-                row = [f'{guid} ({len(gold)} rows)', pred_tp, gold_str, pred_str, cs_cers, ci_cers]
+                row = [f'{guid} ({len(gold)} rows)', pred_tp, gold_datum, pred_datum, cs_cer, ci_cer]
                 if self._source_images_loc:
                     # find the source image
                     img_tss = sorted(list(self._source_image_timestamps[guid].keys()))
                     img_ts_ranges = [(ts, ts + 1) for ts in img_tss]
-                    img_ts_idx = find_range_index(img_ts_ranges, gold_ms, threshold=3)
+                    img_ts_idx = find_range_index(img_ts_ranges, gold_ms, threshold=self.TIMING_MS_THRESHOLD)
                     if img_ts_idx == -1:
                         # if we could not find the image, just add an empty string
                         row.append('')
@@ -178,11 +174,28 @@ class TextRecognitionEvaluator(ClamsAAPBEvaluationTask):
                         b64str = base64.b64encode(open(source_image, 'rb').read()).decode('utf-8')
                         row.append(f'<img src="data:image/jpeg;base64,{b64str}" alt="{gold_ms} milliseconds in {guid} video"/>')
                 self._sbs.loc[len(self._sbs)] = row
-            cased_cers.append(cs_cers)
-            uncased_cers.append(ci_cers)
+            cased_cers.append(cs_cer)
+            uncased_cers.append(ci_cer)
         if len(cased_cers) == 0:
             return -1, -1
+        return self._aggregate_cers(cased_cers, uncased_cers)
+    
+    @staticmethod
+    def _aggregate_cers(cased_cers, uncased_cers):
+        """
+        Aggregate CERs by taking the mean, returns two scores (case sensitive and case insensitive) as floats.
+        """
         return numpy.mean(cased_cers), numpy.mean(uncased_cers)
+
+    @staticmethod
+    def _compute_cer(gold_datum, pred_datum):
+        if not pred_datum or not gold_datum:
+            cs_cer = 1.0  # if either is empty, we assume 100% error
+            ci_cer = 1.0
+        else:
+            cs_cer = cer(pred_datum, gold_datum, exact_case=True)
+            ci_cer = cer(pred_datum, gold_datum, exact_case=False)
+        return ci_cer, cs_cer
 
     def _compare_all(self, golds, preds) -> Any:
         """
@@ -204,17 +217,40 @@ class TextRecognitionEvaluator(ClamsAAPBEvaluationTask):
                 ress.append([guid] + list(results))
         df = pd.DataFrame(ress, columns=cols)
         # then add the average row, ignoring negative values
-        df.loc[len(df)] = ['Average'] + [df[df[col] > 0][col].mean() for col in df.columns[1:]]
+        df.loc[len(df)] = self._average_results_over_guids(df)
         self._results = df.to_csv(index=False, sep=',', header=True)
     
+    @staticmethod
+    def _average_results_over_guids(results: pd.DataFrame):
+        return ['Average'] + [results[results[col] > 0][col].mean() for col in results.columns[1:]]
+        
     def write_side_by_side_view(self):
         if self._do_sbs:
+            
             def replace_newlines_with_br(text):
                 if isinstance(text, str):
                     return text.replace('\n', '<br>')
+                elif isinstance(text, dict):
+                    s = '<ul>'
+                    for k, v in text.items():
+                        s += f'  <li>{k}: {v}</li>'
+                    s += '</ul>'
+                    return s
                 return text
+            
+            def score_dict_to_str(scores) -> str:
+                if isinstance(scores, dict):
+                    s = '<ul>'
+                    for k, v in scores.items():
+                        s += f'  <li>{k}: {v:.6f}</li>'
+                    s += '</ul>'
+                    return s
+                return scores
+            
             for col in ['gold', 'pred']:
                 self._sbs[col] = self._sbs[col].apply(replace_newlines_with_br)
+            for col in ['cased_cer', 'uncased_cer']:
+                self._sbs[col] = self._sbs[col].apply(score_dict_to_str)
             return self._sbs.to_html(index=False, escape=False,
                                      table_id='sbs-table', 
                                      classes='table table-striped')
