@@ -1,4 +1,0 @@
-mmif-python
-lapps
-seqeval
-requests

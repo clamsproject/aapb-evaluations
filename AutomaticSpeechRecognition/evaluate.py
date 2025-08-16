@@ -73,12 +73,15 @@ class AutomaticSpeechRecognitionEvaluator(ClamsAAPBEvaluationTask):
         df.loc[len(df)] = ['Average'] + [df[col].mean() for col in df.columns[1:]]
         self._results = df.to_csv(index=False, sep=',', header=True)
 
+    def write_side_by_side_view(self):
+        pass
+
 
 if __name__ == "__main__":
     parser = AutomaticSpeechRecognitionEvaluator.prep_argparser()
     args = parser.parse_args()
     
-    evaluator = AutomaticSpeechRecognitionEvaluator(args.batchname, args.golds, args.preds)
+    evaluator = AutomaticSpeechRecognitionEvaluator(batchname=args.batchname, gold_loc=args.golds, pred_loc=args.preds)
     evaluator.calculate_metrics(by_guid=True)
     report = evaluator.write_report()
     args.export.write(report.getvalue())

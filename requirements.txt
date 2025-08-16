@@ -1,6 +1,16 @@
-clams-utils
+# basic clams libraries
 mmif-python 
+clams-utils
+mmif-docloc-baapb
+requests
 
+# data processing
+numpy
+pandas
 scikit-learn 
+opencv-python
+
+# metrics
 jiwer
 pyannote.metrics
+seqeval

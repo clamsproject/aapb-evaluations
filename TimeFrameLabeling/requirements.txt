@@ -1,4 +1,0 @@
-mmif-python>= 1.0.9
-pyannote.metrics
-pandas
-requests
