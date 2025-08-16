@@ -66,8 +66,12 @@ class KeyedInformationExtractionEvaluator(TextRecognitionEvaluator):
         hcu_view = text_views[-1]
         hcu_texts = {}
         for doc in hcu_view.get_annotations(DocumentTypes.TextDocument):
-            source = doc.get_property('origin')
-            hcu_texts[source] = json.loads(doc.text_value)
+            # when TR and KIE are the different views from different pipeline components,
+            # we expect `origin` prop in KIE TD, and the `origin` TD is the one from TR view
+            # which is aligned to a time point
+            # if TR and KIE are the same view, the KEI TD itself is aligned to a time point
+            timestamp_source = doc.get_property('origin', doc.id)  
+            hcu_texts[timestamp_source] = json.loads(doc.text_value)
         # NOTE that we're also dealing with video scenario
         fps = next(doc.get_property('fps') for doc in data.documents if doc.get_property('fps'))
         preds = {}
@@ -79,7 +83,7 @@ class KeyedInformationExtractionEvaluator(TextRecognitionEvaluator):
                     in_unit = 'milliseconds' if 'timeunit' not in ali.properties else ali.get_property('timeunit')
                     timestamp = tuh.convert(data.get_start(ali), in_unit, 'milliseconds', fps)
                     # link the timestamp and correct text value by original doc id
-                    preds[timestamp] = hcu_texts[td.long_id]
+                    preds[timestamp] = hcu_texts[td.id]
         return preds, gold
 
     @staticmethod
