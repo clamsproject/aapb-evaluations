@@ -1,204 +1,142 @@
-import argparse
-import collections
-import csv
-import math
-import pathlib
-import sys
+from pathlib import Path
+from typing import Any, Union, Optional, Tuple
 
 import pandas as pd
-from mmif import Mmif, DocumentTypes, AnnotationTypes
+from mmif import Mmif, AnnotationTypes
 from mmif.utils import timeunit_helper as tuh
-from mmif.utils import video_document_helper as vdh
-from pyannote.core import Segment, Timeline, Annotation
+from pyannote.core import Segment, Annotation
 from pyannote.metrics.detection import DetectionErrorRate, DetectionPrecisionRecallFMeasure
+from pyannote.metrics.identification import (IdentificationErrorRate, IdentificationPrecision,
+                                             IdentificationRecall)
 
 import goldretriever
 
+"""
+NOTICE: Currently only evaluates chyron and slate detection
+"""
+
+from common import ClamsAAPBEvaluationTask
+
 # Constants
-GOLD_CHYRON_URL = "https://github.com/clamsproject/aapb-annotations/tree/cc0d58e16a06a8f10de5fc0e5333081c107d5937/newshour-chyron/golds"
-GOLD_SLATES_URL = "https://github.com/clamsproject/aapb-annotations/tree/b1d6476b6be6f9ffcb693872931d4d40e84449c8/january-slates/golds"
+## Note that this repository is private and the files are not available to the public (due to IP concerns), 
+## so using goldretriever to download the gold files WILL NOT work (goldretriever is only for public repositories)
+GOLD_CHYRON_URL = "https://github.com/clamsproject/aapb-annotations/tree/106-chyronunderstanding/newshour-chyron/golds"
+GOLD_SLATES_URL = "https://github.com/clamsproject/aapb-annotations/tree/106-chyronunderstanding/january-slates/golds"
 
+class TimeFrameLabelingEvaluator(ClamsAAPBEvaluationTask):
+    """
+    Evaluating tasks that label time frames which are currently
+    Chyron and Slate Detection (CSD) and Language Identification (LID).
 
-def load_gold_standard(gold_dir):
-    gold_timeframes = collections.defaultdict(Timeline)
-    for gold_fname in pathlib.Path(gold_dir).glob("*.csv"):
-        with open(gold_fname, 'r') as gold_file:
-            aapb_guid = gold_fname.stem
-            r = csv.DictReader(gold_file, delimiter=',')
-            for i, row in enumerate(r):
-                try:
-                    start, end = (tuh.convert(row[time_key], 'iso', 'sec', 0) for time_key in ["start", "end"])
-                    gold_timeframes[aapb_guid].add(Segment(start, end))
-                except ValueError:
-                    sys.stderr.write(f"Invalid time format in {gold_fname}: {row} @ {i}\n")
+    CSD uses Detection Error Rate and Detection Precision, Recall, and F1.
+    LID uses Identification Error Rate and Identification Precision, Recall, and F1.
 
-    return gold_timeframes
+    Note that for error rate, lower is better and can be greater than 100%.
+    We use `pyannote` python library as the implementation for all metrics. .
+    More details can be found https://pyannote.github.io/pyannote-metrics/reference.html
+    """
+    def __init__(self, batchname: str, **kwargs):
+        super().__init__(batchname, **kwargs)
+        self.slates = kwargs.get('slates')
 
+    def _read_gold(self, gold_file: Union[str, Path], **kwargs) -> Any:
+        """
+        :param gold_file: A CSV file containing the gold annotations
+        :return: Annotation object from pyannote library holding gold annotations
+        """
+        gold_annotation = Annotation()
+        col_name = 'scene-label'
+        if self.slates:
+            col_name = 'scene-type'
+        for _, row in pd.read_csv(gold_file).iterrows():
+            if row['start'] != 'NO':
+                gold_annotation[Segment(tuh.convert(row['start'], 'iso', 'seconds', 1),
+                                        tuh.convert(row['end'], 'iso', 'seconds', 1))] = row[col_name]
+        return gold_annotation
 
-def process_mmif_file(mmif_dir, gold_timeframe_dict, frame_types):
-    mmif_files = pathlib.Path(mmif_dir).glob("*.mmif")
-    pred_timeframes = collections.defaultdict(Timeline)
-    for mmif_file in mmif_files:
-        mmif = Mmif(open(mmif_file).read())
-        vds = mmif.get_documents_by_type(DocumentTypes.VideoDocument)
-        if vds:
-            vd = vds[0]
-        else:
-            sys.stderr.write(f"No video document found in {mmif_file}\n")
-            continue
-        aapb_guid = pathlib.Path(vd.location).stem
-        if aapb_guid in gold_timeframe_dict:
-            v = mmif.get_view_contains(AnnotationTypes.TimeFrame)
-            if v is None:
-                sys.stderr.write(f"No TimeFrame found in {mmif_file}\n")
-                continue
-            for tf_ann in v.get_annotations(AnnotationTypes.TimeFrame):
-                if not tf_ann.get_property('frameType') in frame_types:
-                    continue
-                # fps = vdh.get_framerate(vd)
-                fps = 29.97
-                tu = tf_ann.get_property('timeUnit')
-                s = mmif.get_start(tf_ann)
-                e = mmif.get_end(tf_ann)
-                pred_timeframes[aapb_guid].add(Segment(*(tuh.convert(t, tu, 'sec', fps) for t in (s, e))))
-    return pred_timeframes
+    def _read_pred(self, pred_file: Union[str, Path], gold: Optional[Any], **kwargs) -> Tuple[Any, Optional[Any]]:
+        pred_annotation = Annotation()
+        f = open(pred_file, 'r')
+        mmif_str = f.read()
+        f.close()
+        data = Mmif(mmif_str)
+        fps = 29.97
 
-
-# adapt the code from Kelley Lynch - 'evaluate_chyrons.py'
-# add the situation which the mmif file is not in the gold timeframes
-def calculate_detection_metrics(gold_timeframes_dict, test_timeframes, result_path):
-    metric = DetectionErrorRate()
-    final = DetectionPrecisionRecallFMeasure()
-    TP = 0
-    FP = 0
-    FN = 0
-    data = pd.DataFrame(columns=['GUID', 'FN seconds', 'FP seconds', 'Total true seconds'])
-    for file_ID in test_timeframes:
-        reference = Annotation()
-        for segment in gold_timeframes_dict[file_ID]:
-            reference[segment] = "aapb"
-        hypothesis = Annotation()
-        for segment in test_timeframes[file_ID]:
-            hypothesis[segment] = "aapb"
-        results_dict = metric.compute_components(reference, hypothesis, collar=1.0, detailed=True)
-        average = final.compute_components(reference, hypothesis, collar=1.0, detailed=True)
-        true_positive = average['relevant retrieved']
-        false_negative = average['relevant'] - true_positive
-        false_positive = average['retrieved'] - true_positive
-        TP += true_positive
-        FP += false_positive
-        FN += false_negative
-        data = pd.concat(
-            [
-                data,
-                pd.DataFrame({'GUID': file_ID, 
-                              'FN seconds': results_dict['miss'], 
-                              'FP seconds': results_dict['false alarm'], 
-                              'Total true seconds': results_dict['total']}, 
-                             index=[0])
-            ], ignore_index=True)
-    try:
-        precision = TP / (TP + FP)
-    except ZeroDivisionError:
-        precision = 0
-    try:
-        recall = TP / (TP + FN)
-    except ZeroDivisionError:
-        recall = 0
-    if precision + recall == 0:
-        f1 = 0.0
-    else:
-        f1 = (2 * precision * recall) / (precision + recall)
-    with open(result_path, 'w') as out_f:
-        out_f.write(f'Total Precision = {str(precision)}\t Total Recall = {str(recall)}\t Total F1 = {str(f1)}\n\n\nIndividual file results: \n')
-        out_f.write(data.to_string(index=True))
-
-
-def generate_side_by_side(golddir, testdir, outdir):
-    for guid in golddir:
-        no_detection = False
-        path = outdir / f"{guid}.sbs.csv"
-        gold_time_chunks = []
-        test_time_chunks = []
-        for segment in golddir[guid]:
-            if segment.end == 0:
-                continue
-            gold_start = math.floor(segment.start)
-            gold_end = math.floor(segment.end)
-            gold_time_chunks.extend(range(gold_start, gold_end + 1))
-        if guid in testdir:
-            for segment in testdir[guid]:
-                test_start = math.floor(segment.start)
-                test_end = math.ceil(segment.end)
-                test_time_chunks.extend(range(test_start, test_end))
-        if len(gold_time_chunks) > 0 and len(test_time_chunks) > 0:
-            maximum = max(max(gold_time_chunks), max(test_time_chunks))
-        elif len(gold_time_chunks) > 0:
-            maximum = max(gold_time_chunks)
-        elif len(test_time_chunks) > 0:
-            maximum = max(test_time_chunks)
-        else:
-            no_detection = True
-        with open(path, "w") as out_f:
-            if no_detection:
-                out_f.write("no timeframes annotated in gold or predicted by app")
+        tf_view = data.get_view_contains(AnnotationTypes.TimeFrame)
+        for ann in reversed(list(tf_view.get_annotations(AnnotationTypes.TimeFrame))):
+            if ann.get_property('fps'):
+                fps = ann.get_property('fps')
             else:
-                i = 0
-                while i < maximum + 1:
-                    interval = "(" + str(i) + " - " + str(i + 1) + ")"
-                    if i in gold_time_chunks:
-                        gold = 1
-                    else:
-                        gold = 0
-                    if i in test_time_chunks:
-                        test = 1
-                    else:
-                        test = 0
-                    out_f.write(",".join([interval, str(gold), str(test)]))
-                    out_f.write("\n")
-                    i += 1
+                in_unit = ann.get_property('timeUnit')
+                s = data.get_start(ann)
+                e = data.get_end(ann)
+                pred_annotation[Segment(*(tuh.convert(t, in_unit, 'sec', fps) for t in (s, e)))] = ann.get_property('frameType')
+
+        return pred_annotation, gold
+
+    def _compare_pair(self, guid: str, gold: Any, pred: Any) -> Any:
+        """
+        If evaluating CSD, detection error rate, precision, recall, and f1 are returned; 
+        however, pyannote's implementation of precision and recall is incorrect where if 
+        one timeline is empty but the other is not, one of the two metrics will be 1.0 when
+        both should be 0.0. 
+
+        If evaluating LID, identification error rate and precision, recall, and f1 are returned;
+        however, because pyannote does not have a method that calculates f1, it is calculated here.
+        """
+        err_rate = DetectionErrorRate()
+        prf1 = DetectionPrecisionRecallFMeasure()
+
+        results_dict = prf1.compute_components(gold, pred)
+        p, r, f1 = prf1.compute_metrics(results_dict)
+
+        #Correcting precision and recall to 0.0 when one timeline is empty but the other is not
+        if bool(gold.get_timeline().duration()) != bool(pred.get_timeline().duration()): 
+            p=r=0.0
+
+        return err_rate(gold, pred), p, r, f1
+
+    def _compare_all(self, golds, preds) -> Any:
+        """
+        Compare all golds and preds is NOT implemented, hence do not
+        call ``calculate_metrics`` with ``by_guid=False``.
+        """
+        raise NotImplementedError("Comparing all golds and preds is not implemented. ")
+
+    def write_side_by_side_view(self):
+        """
+        Side by side view is NOT yet implemented, hence do not
+        instantiate with ``sbs=True``
+        """
+        raise NotImplementedError("Writing side by side view not yet implemented. ")
+
+    def _finalize_results(self):
+        cols = 'GUID Error-Rate Precision Recall F1'.split()
+
+        df = pd.DataFrame(
+            [[guid] + list(results) for guid, results in self._calculations.items() if results],
+            columns=cols
+        )
+        # then add the average row
+        df.loc[len(df)] = ['Average'] + [df[col].mean() for col in df.columns[1:]]
+        self._results = df.to_csv(index=False, sep=',', header=True)
 
 
 if __name__ == "__main__":
-    # get the absolute path of video-file-dir and hypothesis-file-dir
-    parser = argparse.ArgumentParser(description='Process some directories.')
-    parser.add_argument('-m', '--mmif-dir', type=str, required=True,
-                        help='directory containing machine annotated files (MMIF)')
-    parser.add_argument('-s', '--side-by-side', help='directory to publish side-by-side results', default=None)
-    parser.add_argument('-r', '--result-file', help='file to store evaluation results', default='results.txt')
-    parser.add_argument('-g', '--gold-dir', help='file to store gold standard', default=None)
-    gold_group = parser.add_mutually_exclusive_group(required=True)
-    gold_group.add_argument('--slate', action='store_true', help='slate annotations')
-    gold_group.add_argument('--chyron', action='store_true', help='chyron annotations')
+    parser = TimeFrameLabelingEvaluator.prep_argparser()
+    parser.add_argument('--slate', action='store_true', help='slate annotations')
+
     args = parser.parse_args()
-
-    if args.side_by_side:
-        outdir = pathlib.Path(args.side_by_side)
-        if not outdir.exists():
-            outdir.mkdir()
-    else:
-        outdir = pathlib.Path(__file__).parent
-
     ref_dir = None
-    if args.gold_dir:
-        ref_dir = args.gold_dir
+    if args.golds:
+        ref_dir = args.golds
     else:
         if args.slate:
             ref_dir = goldretriever.download_golds(GOLD_SLATES_URL)
-        elif args.chyron:
+        else:
             ref_dir = goldretriever.download_golds(GOLD_CHYRON_URL)
-    if ref_dir is None:
-        raise ValueError("No gold standard provided")
-    ref_dir = pathlib.Path(ref_dir)
 
-    gold_timeframes_dict = load_gold_standard(ref_dir)
-
-    # create the 'test_timeframes'
-    test_timeframes = process_mmif_file(args.mmif_dir, gold_timeframes_dict, frame_types=['slate' if args.slate else 'chyron' if args.chyron else ''])
-
-    # final calculation
-    calculate_detection_metrics(gold_timeframes_dict, test_timeframes, args.result_file)
-    generate_side_by_side(gold_timeframes_dict, test_timeframes, outdir)
-
-    print("Done!")
-
+    evaluator = TimeFrameLabelingEvaluator(batchname=args.batchname, gold_loc=ref_dir, pred_loc=args.preds, slates=args.slate)
+    evaluator.calculate_metrics(by_guid=True)
+    report = evaluator.write_report()
+    args.export.write(report.getvalue())
