@@ -154,7 +154,9 @@ class TextRecognitionEvaluator(ClamsAAPBEvaluationTask):
             # print('===', guid, gold_ms)
             gold_datum = gold[gold_range]
             # print(f'comparing\n---\n{pred_str}\n===\n{gold_str}\n---')
-            ci_cer, cs_cer = self._compute_cer(gold_datum, pred_datum)
+            if not gold_datum: # found an instance of null keyed information 8/18/25
+                continue
+            cs_cer, ci_cer = self._compute_cer(gold_datum, pred_datum)
             # print(f'CER cased: {cs_cers}, uncased: {ci_cers}\n\n')
             if self._do_sbs:
                 # add to side-by-side comparison
@@ -195,7 +197,7 @@ class TextRecognitionEvaluator(ClamsAAPBEvaluationTask):
         else:
             cs_cer = cer(pred_datum, gold_datum, exact_case=True)
             ci_cer = cer(pred_datum, gold_datum, exact_case=False)
-        return ci_cer, cs_cer
+        return cs_cer, ci_cer
 
     def _compare_all(self, golds, preds) -> Any:
         """
