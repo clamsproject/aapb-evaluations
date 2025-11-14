@@ -29,6 +29,20 @@ class ForcedAlignmentEvaluator(ClamsAAPBEvaluationTask):
     - Missed Detection: Reference time not covered by hypothesis
     - False Alarm: Hypothesis time extending beyond reference
 
+    OUTPUT METRICS:
+    - `DER`: Diarization Error Rate as described above
+    - `evaluation_ratio`: Fraction of gold segments successfully evaluated,
+      calculated as (total_segments - skipped_segments) / total_segments.
+      A value of 1.0 means all segments were evaluated; lower values indicate
+      some segments were skipped due to character offset mismatches.
+
+    CAVEAT: Due to tokenization mismatches between the original NewsHour
+    transcripts and the gold annotations (see
+    https://github.com/clamsproject/aapb-annotations/issues/5), some segments
+    from the FA app may not properly align to gold annotations based on
+    character indices. These segments will be skipped with a warning, which
+    may result in incomplete evaluation coverage for affected files.
+
     We use `pyannote.metrics` library for the implementation. More details at:
     https://pyannote.github.io/pyannote-metrics/reference.html#diarization
     """
@@ -36,6 +50,7 @@ class ForcedAlignmentEvaluator(ClamsAAPBEvaluationTask):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.regex_timestamp = re.compile(r"(\d{2}):(\d{2}):(\d{2})[.,](\d{1,3})")
+        self._segment_stats = {}  # Track gold segments and skipped segments per GUID
 
     @property
     def results(self) -> Union[dict, str]:
@@ -62,7 +77,10 @@ class ForcedAlignmentEvaluator(ClamsAAPBEvaluationTask):
         guid = guidhandler.get_aapb_guid_from(str(pred_file))
         mmif = Mmif(open(pred_file, 'r').read())
         # pick the last view with required annotations
-        fa_view = mmif.get_views_contain(AnnotationTypes.Token, AnnotationTypes.TimeFrame, AnnotationTypes.Alignment)[-1]
+        fa_view_cands = mmif.get_views_contain(AnnotationTypes.Token, AnnotationTypes.TimeFrame, AnnotationTypes.Alignment)
+        if not fa_view_cands:
+            raise ValueError(f"{guid} :: No view with required annotations found in MMIF.")
+        fa_view = fa_view_cands[-1]
         pred_charstart_to_timestart = {}
         pred_charend_to_timeend = {}
         for token in fa_view.get_annotations(AnnotationTypes.Token):
@@ -82,7 +100,11 @@ class ForcedAlignmentEvaluator(ClamsAAPBEvaluationTask):
                 raise ValueError(f"{guid} :: No TimeFrame aligned with Token [{token_start}, {token_end}]")
 
         # Build hypothesis annotation from gold labels and predicted times
+        total_segments = 0
+        skipped_segments = 0
+
         for segment, _, label in gold.itertracks(yield_label=True):
+            total_segments += 1
             # Split label to get alignment-start and alignment-end
             char_start, char_end = map(int, label.split('-'))
 
@@ -94,10 +116,18 @@ class ForcedAlignmentEvaluator(ClamsAAPBEvaluationTask):
                 # Create hypothesis segment with matching label
                 pred[Segment(time_start, time_end)] = label
             except KeyError as e:
+                skipped_segments += 1
                 self.logger.warning(
                     f"{guid} :: Character position {e} not found in prediction. "
                     f"Skipping gold segment [{char_start}, {char_end}]"
                 )
+
+        # Store segment statistics for this GUID
+        self._segment_stats[guid] = {
+            'total': total_segments,
+            'skipped': skipped_segments
+        }
+
         return pred, None  # return None gold since nothing should have changed in gold
 
     def _compare_pair(self, guid: str, reference: Annotation, hypothesis: Annotation) -> float:
@@ -133,13 +163,20 @@ class ForcedAlignmentEvaluator(ClamsAAPBEvaluationTask):
 
     def _finalize_results(self):
         """Aggregate DER results and calculate average."""
-        cols = ['GUID', 'DER']
+        cols = ['GUID', 'DER', 'evaluation_ratio']
         data = []
 
         for guid, result in self._calculations.items():
             if result is False:  # File exists but no data read
                 continue
-            data.append([guid, result])
+
+            # Calculate evaluation ratio: (total - skipped) / total
+            stats = self._segment_stats.get(guid, {'total': 0, 'skipped': 0})
+            total = stats['total']
+            skipped = stats['skipped']
+            eval_ratio = (total - skipped) / total if total > 0 else 0.0
+
+            data.append([guid, result, eval_ratio])
 
         if not data:
             self._results = "No valid results to report.\n"
@@ -147,8 +184,9 @@ class ForcedAlignmentEvaluator(ClamsAAPBEvaluationTask):
 
         df = pd.DataFrame(data, columns=cols)
         res_str = (
-            f'Individual file results:\n{df.to_string(index=False)}\n\n\n'
-            f'Average DER: {df["DER"].mean():.4f}\n\n\n'
+            f'Individual file results (total: {len(df)} files):\n{df.to_string(index=False)}\n\n\n'
+            f'Average DER: {df["DER"].mean():.4f}\n'
+            f'Average evaluation ratio: {df["evaluation_ratio"].mean():.4f}\n\n\n'
         )
         self._results = res_str
 
