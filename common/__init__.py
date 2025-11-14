@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import sys
+import traceback
 import warnings
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -239,7 +240,14 @@ class ClamsAAPBEvaluationTask(ABC):
                     if new_gold is not None:
                         gold = new_gold
                 except Exception as e:
-                    warnings.warn(f"Error reading pred file {pred_f}: {e}", RuntimeWarning)
+                    tb = traceback.format_exc()
+                    warnings.warn(
+                        f"Error reading pred file {pred_f}:\n"
+                        f"Exception type: {type(e).__name__}\n"
+                        f"Error message: {e}\n"
+                        f"Traceback:\n{tb}",
+                        RuntimeWarning
+                    )
                     pred = None
             else:
                 pred = None
