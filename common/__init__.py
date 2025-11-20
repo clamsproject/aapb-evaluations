@@ -19,6 +19,7 @@ import io
 import json
 import logging
 import os
+import subprocess
 import sys
 import traceback
 import warnings
@@ -57,6 +58,7 @@ class ClamsAAPBEvaluationTask(ABC):
         self._taskname = 'NO-TASK' if self.__class__ == ClamsAAPBEvaluationTask else \
             Path(inspect.getfile(self.__class__)).parent.name  # use the name of the directory as the name
         self.logger = logging.getLogger(self._taskname)
+        self._batchname = batchname  # store batchname for report generation
         self.pairs = {}  # guid: [gold, pred] pairs
         if batchname is not None:
             self._set_guids_from_batchname(batchname)
@@ -323,6 +325,46 @@ class ClamsAAPBEvaluationTask(ABC):
         """
         raise NotImplementedError
 
+    def _get_code_version(self) -> str:
+        """
+        Get the version of the evaluation code file. Uses git to determine
+        if the file has uncommitted changes. If clean, returns the last
+        commit hash for the file; otherwise returns 'dirty'.
+        """
+        # Get the file path of the subclass (the actual evaluation script)
+        eval_file = Path(inspect.getfile(self.__class__))
+        try:
+            # Check if the file has uncommitted changes
+            result = subprocess.run(
+                ['git', 'status', '--porcelain', str(eval_file)],
+                capture_output=True,
+                text=True,
+                cwd=eval_file.parent
+            )
+            if result.returncode != 0:
+                return 'unknown (git error)'
+
+            # If there's output, the file has changes (modified, staged, etc.)
+            if result.stdout.strip():
+                return 'dirty'
+
+            # File is clean, get the last commit hash for this file
+            result = subprocess.run(
+                ['git', 'log', '-1', '--format=%h', '--', str(eval_file)],
+                capture_output=True,
+                text=True,
+                cwd=eval_file.parent
+            )
+            if result.returncode != 0 or not result.stdout.strip():
+                return 'unknown (no commits)'
+
+            return result.stdout.strip()
+        except FileNotFoundError:
+            # git command not found
+            return 'unknown (git not available)'
+        except Exception as e:
+            return f'unknown ({e})'
+
     def write_report(self) -> io.StringIO:
         """
         Create a report file using a markdown template. First section of 
@@ -330,11 +372,24 @@ class ClamsAAPBEvaluationTask(ABC):
         """
         self._finalize_results()
         report = io.StringIO()
-        report.write(f"# Evaluation Report for `{self.taskname}` task as of {datetime.datetime.now()}\n")   
+        report.write(f"# Evaluation Report for `{self.taskname}` task as of {datetime.datetime.now()}\n")
         report.write(f"\n## Evaluation method\n{inspect.cleandoc(self.__doc__)}\n")
+
+        # Build batch name info
+        if self._batchname:
+            batch_info = self._batchname
+        else:
+            guids = sorted(self.pairs.keys())
+            batch_info = f"unspecified (GUIDs: {', '.join(guids)})"
+
+        # Get code version
+        code_version = self._get_code_version()
+
         report.write(f"\n## Data specs\n"
-                     f"- Groundtruth data location: {self._gold_loc}'\n"
-                     f"- System prediction (MMIF) location: {self._pred_loc}'\n")
+                     f"- Batch name: {batch_info}\n"
+                     f"- Groundtruth data location: {self._gold_loc}\n"
+                     f"- System prediction (MMIF) location: {self._pred_loc}\n"
+                     f"- Evaluation code version: {code_version}\n")
         report.write(f"\n## Pipeline specs\n")
         # TODO (krim @ 4/4/25): parse mmif and get pipeline info
         report.write(f"\n## Raw Results\n")
