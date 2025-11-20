@@ -375,21 +375,43 @@ class ClamsAAPBEvaluationTask(ABC):
         report.write(f"# Evaluation Report for `{self.taskname}` task as of {datetime.datetime.now()}\n")
         report.write(f"\n## Evaluation method\n{inspect.cleandoc(self.__doc__)}\n")
 
-        # Build batch name info
+        # Build batch name info with link to aapb-annotations
         if self._batchname:
-            batch_info = self._batchname
+            batch_url = f"https://github.com/clamsproject/aapb-annotations/tree/main/batches/{self._batchname}.txt"
+            batch_info = f"[{self._batchname}]({batch_url})"
         else:
             guids = sorted(self.pairs.keys())
             batch_info = f"unspecified (GUIDs: {', '.join(guids)})"
 
-        # Get code version
+        # Get code version and build link to aapb-evaluations
         code_version = self._get_code_version()
+        if code_version not in ('dirty', ) and not code_version.startswith('unknown'):
+            # Get relative path of eval file from repo root
+            eval_file = Path(inspect.getfile(self.__class__))
+            try:
+                result = subprocess.run(
+                    ['git', 'rev-parse', '--show-toplevel'],
+                    capture_output=True,
+                    text=True,
+                    cwd=eval_file.parent
+                )
+                if result.returncode == 0:
+                    repo_root = Path(result.stdout.strip())
+                    rel_path = eval_file.relative_to(repo_root)
+                    code_url = f"https://github.com/clamsproject/aapb-evaluations/blob/{code_version}/{rel_path}"
+                    code_version_info = f"[{code_version}]({code_url})"
+                else:
+                    code_version_info = code_version
+            except Exception:
+                code_version_info = code_version
+        else:
+            code_version_info = code_version
 
         report.write(f"\n## Data specs\n"
                      f"- Batch name: {batch_info}\n"
                      f"- Groundtruth data location: {self._gold_loc}\n"
                      f"- System prediction (MMIF) location: {self._pred_loc}\n"
-                     f"- Evaluation code version: {code_version}\n")
+                     f"- Evaluation code version: {code_version_info}\n")
         report.write(f"\n## Pipeline specs\n")
         # TODO (krim @ 4/4/25): parse mmif and get pipeline info
         report.write(f"\n## Raw Results\n")
