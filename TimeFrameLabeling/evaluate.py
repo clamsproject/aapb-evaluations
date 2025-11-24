@@ -7,7 +7,6 @@ import pandas as pd
 from mmif import Mmif, AnnotationTypes
 from mmif.utils import timeunit_helper as tuh
 from pyannote.core import Segment, Annotation
-from pyannote.metrics.detection import DetectionErrorRate, DetectionPrecisionRecallFMeasure
 from pyannote.metrics.diarization import (DiarizationErrorRate, DiarizationPurity,
                                           DiarizationCoverage)
 from pyannote.metrics.errors.identification import IdentificationErrorAnalysis
@@ -16,41 +15,37 @@ import goldretriever
 
 from common import ClamsAAPBEvaluationTask
 
-# Constants
-GOLD_CHYRON_URL = "https://github.com/clamsproject/aapb-annotations/tree/106-chyronunderstanding/newshour-chyron/golds"
-GOLD_SLATES_URL = "https://github.com/clamsproject/aapb-annotations/tree/106-chyronunderstanding/january-slates/golds"
-
-
 class TimeFrameLabelingEvaluator(ClamsAAPBEvaluationTask):
     """
-    Evaluating tasks that label time frames which are currently
-    Chyron and Slate Detection (CSD) and Language Identification (LID).
+    Evaluating tasks that label time frames such as chyron detection, slate detection, 
+    and language identification using diarization error rate, purity, and coverage. 
 
-    CSD uses Detection Error Rate and Detection Precision, Recall, and F1.
-    LID uses Diarization Error Rate and Diarization Purity and Coverage.
-        - When evaluating LID, a confusion matrix is also provided after
-        the raw results
+    - Diarization Error Rate (DER) is the sum of three types of errors divided by the total duration:
+        - False Alarm: A segment is predicted with a label when there is none in the gold
+        - Missed Detection: A segment in the gold is not predicted
+        - Confusion: A segment is predicted with an incorrect label
+    - Purity can be understood to be precision-like and measures how much of the predicted
+      segments are correctly labeled.
+    - Coverage can be understood to be recall-like and measures how much of the gold
+      segments are labeled underneath a single label. 
 
-    Note that for error rate, lower is better and can be greater than 100%.
+    Note that for DER, lower is better and can be greater than 100%.
     For all metrics, we use the `pyannote` library.
     More details can be found at https://pyannote.github.io/pyannote-metrics/reference.html
     """
-
     def __init__(self, batchname: str, **kwargs):
         super().__init__(batchname, **kwargs)
         self.task = kwargs.get('task')
 
-        task_dict = {'chyron': 'Chyron Detection',
-                     'slate': 'Slate Detection',
-                     'lid': 'Language Identification',
-                     }
-        self._taskname = task_dict[self.task]
         self._confusion_durations = defaultdict(lambda: defaultdict(float))
+        self._per_class_metrics = {}
+
+        #LID specific variables
         self._lr_gold = None
         self._lr_preds = {}
         self._lr_idx = 0
 
-    def _read_gold(self, gold_file: Union[str, Path], **kwargs) -> Any:
+    def _read_gold(self, gold_file: Union[str, Path], **kwargs) -> Annotation:
         """
         :param gold_file: A CSV file containing the gold annotations
         :return: Annotation object from pyannote library holding gold annotations
@@ -66,6 +61,13 @@ class TimeFrameLabelingEvaluator(ClamsAAPBEvaluationTask):
                     label = 'lr0'
                 gold_annotation[Segment(tuh.convert(row['start'], 'iso', 'seconds', 1),
                                         tuh.convert(row['end'], 'iso', 'seconds', 1))] = label
+                #Set up per-class metrics dict
+                if label not in self._per_class_metrics:
+                    self._per_class_metrics[label] = {
+                        'Error-Rate' : DiarizationErrorRate(),
+                        'Purity' : DiarizationPurity(),
+                        'Coverage' : DiarizationCoverage()
+                    }
 
         return gold_annotation
 
@@ -76,8 +78,9 @@ class TimeFrameLabelingEvaluator(ClamsAAPBEvaluationTask):
         f.close()
         data = Mmif(mmif_str)
         fps = 29.97
-        lr_idx = 0
 
+        #Between chyron/slate and LID MMIFs, the property name is different
+        #Will remove once unified
         if self.task == 'lid':
             property_name = 'label'
         else:
@@ -92,9 +95,7 @@ class TimeFrameLabelingEvaluator(ClamsAAPBEvaluationTask):
                 s = data.get_start(ann)
                 e = data.get_end(ann)
                 label = ann.get_property(property_name)
-                if self.task == 'lid':
-                    label = label[2:4]
-                # If a label is not predicted as en or es, it is relabeled as 'lr'
+                # If a label is not predicted as en or es, it is relabeled as 'lrX'
                 if self.task == 'lid' and label != 'en' and label != 'es':
                     if label not in self._lr_preds:
                         lr_label = f'lr{self._lr_idx}'
@@ -109,32 +110,24 @@ class TimeFrameLabelingEvaluator(ClamsAAPBEvaluationTask):
 
     def _compare_pair(self, guid: str, gold: Any, pred: Any) -> Any:
         """
-        If evaluating CSD, detection error rate, precision, recall, and f1 are returned;
-        however, pyannote's implementation of precision and recall is incorrect where if
-        one timeline is empty but the other is not, one of the two will be 1.0 when
-        both should be 0.0. This is corrected here. 
-
-        If evaluating LID, diarization error rate, purity, and coverage are returned.
+        When evaluating LID, all low-resource languages are collapsed under a single label. 
+        In addition to computing overall DER, purity, and coverage, per-class metrics for each
+        gold label are computed; and results for a confusion matrix are aggregated.
         """
 
-        #Calculate the metrics
-        if self.task == 'lid':
-            err_rate = DiarizationErrorRate()(gold, pred)
-            p = DiarizationPurity()(gold, pred)
-            c = DiarizationCoverage()(gold, pred)
-            metrics = (err_rate, p, c)
+        metrics = [DiarizationErrorRate(), DiarizationPurity(), DiarizationCoverage()]
+        metric_names = ['Error-Rate', 'Purity', 'Coverage']
 
-        else:
-            err_rate = DetectionErrorRate()(gold, pred)
-            prf1 = DetectionPrecisionRecallFMeasure()
-            results_dict = prf1.compute_components(gold, pred)
-            p, r, f1 = prf1.compute_metrics(results_dict)
-
-            # Correcting precision and recall to 0.0 when one timeline is empty but the other is not
-            if bool(gold.get_timeline().duration()) != bool(pred.get_timeline().duration()):
-                p, r = (0.0, 0.0)
-
-            metrics = (err_rate, p, r, f1)
+        #Calculate per-class metrics if task is not binary like chyron/slate detection
+        if len(self._per_class_metrics) > 1:
+            for label in set(gold.labels()):
+                filtered_gold = gold.subset([label])
+                if self.task == 'lid' and label == 'lr0':
+                    filtered_pred = self._collapse_lr(pred).subset([label])
+                else:
+                    filtered_pred = pred.subset([label])
+                for name in metric_names:
+                    self._per_class_metrics[label][name](filtered_gold, filtered_pred)
 
         #Aggregrating results for confusion matrix
         err = IdentificationErrorAnalysis()
@@ -142,7 +135,10 @@ class TimeFrameLabelingEvaluator(ClamsAAPBEvaluationTask):
             if track == 'confusion0' or track == 'correct0':
                 self._confusion_durations[label[1]][label[2]] += segment.duration
 
-        return metrics
+        #Calculate and return overall metrics
+        if self.task == 'lid':
+            pred = self._collapse_lr(pred)
+        return (metric(gold,pred) for metric in metrics)
 
     def _compare_all(self, golds, preds) -> Any:
         """
@@ -170,20 +166,36 @@ class TimeFrameLabelingEvaluator(ClamsAAPBEvaluationTask):
         df = df.fillna(0.0)
         df = df.map(lambda x: tuh.convert(x, 'sec', 'iso', 1))
         #Rename lr0 with gold lr label
-        idx_list = list(df.index.array)
-        idx_list[idx_list.index('lr0')] = self._lr_gold
-        df.index = idx_list
+        if self.task == 'lid':
+            idx_list = list(df.index.array)
+            idx_list[idx_list.index('lr0')] = self._lr_gold
+            df.index = idx_list
         
-        #Rename col names with original labels
-        df.rename(columns={val:key for key,val in self._lr_preds.items()}, inplace=True)
+            #Rename col names with original labels
+            df.rename(columns={val:key for key,val in self._lr_preds.items()}, inplace=True)
         return df.to_csv(index=True, sep=',', header=True)
+    
+
+    def _collapse_lr(self, annotation: Annotation) -> Annotation:
+        """
+        Collapses all 'lrX' labels into a single 'lr0' label for evaluation purposes.
+        This is used when evaluating LID since the primary goal is to distinguish low-resource
+        languages from English and Spanish. 
+
+        :param annotation: The Annotation object to collapse
+        :return: The collapsed Annotation object
+        """
+        collapsed_annotation = Annotation()
+        for segment, _, label in annotation.itertracks(yield_label=True):
+            if label.startswith('lr'):
+                collapsed_annotation[segment] = 'lr0'
+            else:
+                collapsed_annotation[segment] = label
+        return collapsed_annotation
 
 
     def _finalize_results(self):
-        if self.task != 'lid':
-            cols = 'GUID Error-Rate Precision Recall F1'.split()
-        else:
-            cols = 'GUID Error-Rate Purity Coverage'.split()
+        cols = 'GUID Error-Rate Purity Coverage'.split()
 
         df = pd.DataFrame(
             [[guid] + list(results) for guid, results in self._calculations.items() if results],
@@ -192,26 +204,32 @@ class TimeFrameLabelingEvaluator(ClamsAAPBEvaluationTask):
         # then add the average row
         df.loc[len(df)] = ['Average'] + [df[col].mean() for col in df.columns[1:]]
         self._results = df.to_csv(index=False, sep=',', header=True)
-        # add confusion matrix after Raw Results if evaluating LID
-        if self.task == 'lid':
-            self._results += '\n### Confusion Matrix\n'
-            self._make_confusion_matrix()
-            self.results += self._make_confusion_matrix()
 
+        # add per class metrics if not binary classification
+        if len(self._per_class_metrics) > 1:
+            self._results += '\n### Per Class Metrics\n'
+            per_class_df = pd.DataFrame(self._per_class_metrics).T
+            if self.task == 'lid':
+                per_class_df = per_class_df.rename(index={ 'lr0': self._lr_gold })
+                per_class_df = per_class_df.map(lambda x: abs(x))
+            self._results += per_class_df.to_csv(index=True, sep=',', header=True)
+
+        # add confusion matrix after Raw Results if evaluating LID
+        # TODO: generalize confusion matrix for other tasks
+        # if self.task == 'lid':
+        #     self._results += '\n### Confusion Matrix\n'
+        #     self._make_confusion_matrix()
+        #     self._results += self._make_confusion_matrix()
+        self._results += '\n### Confusion Matrix\n'
+        self._make_confusion_matrix()
+        self._results += self._make_confusion_matrix()
 
 if __name__ == "__main__":
     parser = TimeFrameLabelingEvaluator.prep_argparser()
     parser.add_argument('-t', '--task', choices=['chyron', 'slate', 'lid'], default='chyron')
 
     args = parser.parse_args()
-    ref_dir = None
-    if args.golds:
-        ref_dir = args.golds
-    else:
-        if args.task == 'slate':
-            ref_dir = goldretriever.download_golds(GOLD_SLATES_URL)
-        elif args.task == 'chyron':
-            ref_dir = goldretriever.download_golds(GOLD_CHYRON_URL)
+    ref_dir = args.golds
 
     evaluator = TimeFrameLabelingEvaluator(batchname=args.batchname, gold_loc=ref_dir,
                                            pred_loc=args.preds, task=args.task)
