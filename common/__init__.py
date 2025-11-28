@@ -19,6 +19,7 @@ import io
 import json
 import logging
 import os
+import subprocess
 import sys
 import traceback
 import warnings
@@ -28,6 +29,7 @@ from typing import Union, Iterable, Any, Tuple, Optional, List
 
 from clams_utils.aapb import guidhandler, goldretriever
 from mmif import Mmif
+from mmif.utils import workflow_helper as wfh
 
 logging.basicConfig(
     level=logging.INFO,
@@ -57,6 +59,7 @@ class ClamsAAPBEvaluationTask(ABC):
         self._taskname = 'NO-TASK' if self.__class__ == ClamsAAPBEvaluationTask else \
             Path(inspect.getfile(self.__class__)).parent.name  # use the name of the directory as the name
         self.logger = logging.getLogger(self._taskname)
+        self._batchname = batchname  # store batchname for report generation
         self.pairs = {}  # guid: [gold, pred] pairs
         if batchname is not None:
             self._set_guids_from_batchname(batchname)
@@ -66,8 +69,7 @@ class ClamsAAPBEvaluationTask(ABC):
         self._pred_loc = pred_loc
         self._get_gold_files(gold_loc)
         self._get_pred_files(pred_loc)
-        self.specs = {}  # TODO (krim @ 8/14/25): placeholder for pipeline specs for the evaluation task
-
+        self._wfid, self._wfprofilings = self.validate_pred_mmifs(pred_loc)
         self._results = None
         # variable to store scores for each guid, and overall scores under '*' key
         self._calculations = {}
@@ -75,6 +77,29 @@ class ClamsAAPBEvaluationTask(ABC):
         self._do_sbs = kwargs.get('sbs', False)
         # use a separate variable to store side-by-side results, if needed
         # then use `self._write_side_by_side_view` to "pretty-print" the results
+
+    @staticmethod
+    def validate_pred_mmifs(pred_loc):
+        collection_summ = wfh.describe_mmif_collection(pred_loc)
+        # valid preds
+        # 1. must be from the same workflow
+        # 2. must have at least one MMIF file with annotations (no empty MMIFs)
+        workflows = collection_summ['mmifCountByWorkflow']
+        if len(workflows) == 0:
+            raise ValueError("No valid MMIF files found in the prediction location.")
+        # TODO (krim @ 2025-11-27): eventually we need better support from the wfh implementation
+        # to handle multiple workflows in the same collection properly
+        # for example, the "mmifCountByWorkflow" should not count empty or error MMIFs
+        else:
+            # but for now...
+            # pick the most frequent workflow from the workflows dict
+            wfid = max(workflows, key=lambda k: workflows[k])
+            logging.info(f"Prediction MMIFs are from workflow {wfid}.")
+            mmif_num = workflows[wfid]
+            logging.info(f"Number of MMIF files from workflow {wfid}: {mmif_num}.")
+            if mmif_num == 0:
+                raise ValueError(f"Prediction MMIFs for workflow {wfid} contain no annotations.")
+        return wfid, collection_summ['appProfilings']
 
     @property
     def taskname(self) -> str:
@@ -323,6 +348,46 @@ class ClamsAAPBEvaluationTask(ABC):
         """
         raise NotImplementedError
 
+    def _get_code_version(self) -> str:
+        """
+        Get the version of the evaluation code file. Uses git to determine
+        if the file has uncommitted changes. If clean, returns the last
+        commit hash for the file; otherwise returns 'dirty'.
+        """
+        # Get the file path of the subclass (the actual evaluation script)
+        eval_file = Path(inspect.getfile(self.__class__))
+        try:
+            # Check if the file has uncommitted changes
+            result = subprocess.run(
+                ['git', 'status', '--porcelain', str(eval_file)],
+                capture_output=True,
+                text=True,
+                cwd=eval_file.parent
+            )
+            if result.returncode != 0:
+                return 'unknown (git error)'
+
+            # If there's output, the file has changes (modified, staged, etc.)
+            if result.stdout.strip():
+                return 'dirty'
+
+            # File is clean, get the last commit hash for this file
+            result = subprocess.run(
+                ['git', 'log', '-1', '--format=%h', '--', str(eval_file)],
+                capture_output=True,
+                text=True,
+                cwd=eval_file.parent
+            )
+            if result.returncode != 0 or not result.stdout.strip():
+                return 'unknown (no commits)'
+
+            return result.stdout.strip()
+        except FileNotFoundError:
+            # git command not found
+            return 'unknown (git not available)'
+        except Exception as e:
+            return f'unknown ({e})'
+
     def write_report(self) -> io.StringIO:
         """
         Create a report file using a markdown template. First section of 
@@ -330,13 +395,53 @@ class ClamsAAPBEvaluationTask(ABC):
         """
         self._finalize_results()
         report = io.StringIO()
-        report.write(f"# Evaluation Report for `{self.taskname}` task as of {datetime.datetime.now()}\n")   
+        report.write(f"# Evaluation Report for `{self.taskname}` task as of {datetime.datetime.now()}\n")
         report.write(f"\n## Evaluation method\n{inspect.cleandoc(self.__doc__)}\n")
+
+        # Build batch name info with link to aapb-annotations
+        if self._batchname:
+            batch_url = f"https://github.com/clamsproject/aapb-annotations/tree/main/batches/{self._batchname}.txt"
+            batch_info = f"[{self._batchname}]({batch_url})"
+        else:
+            guids = sorted(self.pairs.keys())
+            batch_info = f"unspecified (GUIDs: {', '.join(guids)})"
+
+        # Get code version and build link to aapb-evaluations
+        code_version = self._get_code_version()
+        if code_version not in ('dirty', ) and not code_version.startswith('unknown'):
+            # Get relative path of eval file from repo root
+            eval_file = Path(inspect.getfile(self.__class__))
+            try:
+                result = subprocess.run(
+                    ['git', 'rev-parse', '--show-toplevel'],
+                    capture_output=True,
+                    text=True,
+                    cwd=eval_file.parent
+                )
+                if result.returncode == 0:
+                    repo_root = Path(result.stdout.strip())
+                    rel_path = eval_file.relative_to(repo_root)
+                    code_url = f"https://github.com/clamsproject/aapb-evaluations/blob/{code_version}/{rel_path}"
+                    code_version_info = f"[{code_version}]({code_url})"
+                else:
+                    code_version_info = code_version
+            except Exception:
+                code_version_info = code_version
+        else:
+            code_version_info = code_version
+
         report.write(f"\n## Data specs\n"
-                     f"- Groundtruth data location: {self._gold_loc}'\n"
-                     f"- System prediction (MMIF) location: {self._pred_loc}'\n")
-        report.write(f"\n## Pipeline specs\n")
-        # TODO (krim @ 4/4/25): parse mmif and get pipeline info
+                     f"- Batch name: {batch_info}\n"
+                     f"- Groundtruth data location: {self._gold_loc}\n"
+                     # f"- System prediction (MMIF) location: {self._pred_loc}\n"  # expose local file paths, is it ok?
+                     f"- Evaluation code version: {code_version_info}\n")
+        report.write(f"\n## Workflow specs\n")
+        report.write(f"- Workflow ID: {self._wfid}\n")
+        report.write(f"- Workflow App Profilings:\n")
+        report.write("```json\n")
+        json.dump(self._wfprofilings, report, indent=2)
+        report.write("\n```\n")
+
         report.write(f"\n## Raw Results\n")
         if isinstance(self.results, dict):
             report.write("```json\n")
