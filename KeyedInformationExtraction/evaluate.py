@@ -58,8 +58,8 @@ class KeyedInformationExtractionEvaluator(TextRecognitionEvaluator):
             DocumentTypes.TextDocument, AnnotationTypes.Alignment)
         if not cand_views:
             raise Exception("No TR view found in the MMIF file. A TR view should contain TextDocument and Alignment annotations")
-        # pick the last 
-        tr_view = cand_views[-1]
+        # pick the FIRST
+        tr_view = cand_views[0]
         # get chyron parsed view
         # TODO (ledibr @ 7/21/25): correctly raise an exception if not found
         text_views = data.get_all_views_contain(DocumentTypes.TextDocument)
@@ -69,9 +69,13 @@ class KeyedInformationExtractionEvaluator(TextRecognitionEvaluator):
             # when TR and KIE are the different views from different pipeline components,
             # we expect `origin` prop in KIE TD, and the `origin` TD is the one from TR view
             # which is aligned to a time point
-            # if TR and KIE are the same view, the KEI TD itself is aligned to a time point
-            timestamp_source = doc.get_property('origin', doc.id)  
-            hcu_texts[timestamp_source] = json.loads(doc.text_value)
+            # if TR and KIE are the same view, the KIE TD itself is aligned to a time point
+            timestamp_source = doc.get_property('origin', doc.id)
+            try:
+                hcu_texts[timestamp_source] = json.loads(doc.text_value)
+            except:
+                print(f"Error: {doc.text_value} is not a valid JSON string")
+                hcu_texts[timestamp_source] = {"name-as-written": "", "name-normalized": "", "attributes": []}
         # NOTE that we're also dealing with video scenario
         fps = next(doc.get_property('fps') for doc in data.documents if doc.get_property('fps'))
         preds = {}
@@ -129,6 +133,9 @@ class KeyedInformationExtractionEvaluator(TextRecognitionEvaluator):
                 if (len(gold_value) == 0 and len(pred_value) > 0) or (len(pred_value) == 0 and len(gold_value) > 0):
                     cased_cers[key] = 1.0
                     uncased_cers[key] = 1.0
+                elif len(gold_value) == 0 and len(pred_value) == 0:
+                    cased_cers[key] = 0.0
+                    uncased_cers[key] = 0.0
                 else:
                     cased_cers[key] = cer(pred_value, gold_value, exact_case=True)
                     uncased_cers[key] = cer(pred_value, gold_value, exact_case=False)
@@ -139,7 +146,7 @@ class KeyedInformationExtractionEvaluator(TextRecognitionEvaluator):
         Compare all golds and preds is NOT implemented, hence do not 
         call ``calculate_metrics`` with ``by_guid=False``.
         """
-        raise NotImplementedError("Comparing all golds and preds is not implemented. ")
+        raise NotImplementedError("Comparing all golds and preds is not implemented.")
 
     @staticmethod
     def _average_results_over_guids(results: pd.DataFrame):
