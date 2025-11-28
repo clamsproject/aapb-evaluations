@@ -1,4 +1,4 @@
-# Evaluation Report for `TimeFrameLabeling` task as of 2025-11-28 05:36:18.697299
+# Evaluation Report for `TimeFrameLabeling` task as of 2025-11-28 11:22:19.234690
 
 ## Evaluation method
 Evaluating tasks that label time frames such as chyron detection, slate detection, 
@@ -20,11 +20,23 @@ More details can be found at https://pyannote.github.io/pyannote-metrics/referen
 ## Data specs
 - Batch name: unspecified (GUIDs: cpb-aacip-lid-silver-001, cpb-aacip-lid-silver-002, cpb-aacip-lid-silver-003, cpb-aacip-lid-silver-004, cpb-aacip-lid-silver-005, cpb-aacip-lid-silver-006, cpb-aacip-lid-silver-007, cpb-aacip-lid-silver-008, cpb-aacip-lid-silver-009, cpb-aacip-lid-silver-010, cpb-aacip-lid-silver-011, cpb-aacip-lid-silver-012, cpb-aacip-lid-silver-013, cpb-aacip-lid-silver-014, cpb-aacip-lid-silver-015, cpb-aacip-lid-silver-016, cpb-aacip-lid-silver-017, cpb-aacip-lid-silver-018, cpb-aacip-lid-silver-019, cpb-aacip-lid-silver-020, cpb-aacip-lid-silver-021, cpb-aacip-lid-silver-022, cpb-aacip-lid-silver-023, cpb-aacip-lid-silver-024, cpb-aacip-lid-silver-025, cpb-aacip-lid-silver-026, cpb-aacip-lid-silver-027, cpb-aacip-lid-silver-028, cpb-aacip-lid-silver-029, cpb-aacip-lid-silver-030, cpb-aacip-lid-silver-031, cpb-aacip-lid-silver-032, cpb-aacip-lid-silver-033, cpb-aacip-lid-silver-034, cpb-aacip-lid-silver-035, cpb-aacip-lid-silver-036, cpb-aacip-lid-silver-037, cpb-aacip-lid-silver-038, cpb-aacip-lid-silver-039, cpb-aacip-lid-silver-040, cpb-aacip-lid-silver-041, cpb-aacip-lid-silver-042, cpb-aacip-lid-silver-043, cpb-aacip-lid-silver-044, cpb-aacip-lid-silver-045, cpb-aacip-lid-silver-046, cpb-aacip-lid-silver-047, cpb-aacip-lid-silver-048, cpb-aacip-lid-silver-049, cpb-aacip-lid-silver-050, cpb-aacip-lid-silver-051, cpb-aacip-lid-silver-052, cpb-aacip-lid-silver-053, cpb-aacip-lid-silver-054, cpb-aacip-lid-silver-055, cpb-aacip-lid-silver-056, cpb-aacip-lid-silver-057, cpb-aacip-lid-silver-058, cpb-aacip-lid-silver-059, cpb-aacip-lid-silver-060)
 - Groundtruth data location: /mnt/llc/llc_data/clams/lrslid/prototype-eval-r2-synthetic-data/lid-annotations
-- Evaluation code version: [c6ccffc](https://github.com/clamsproject/aapb-evaluations/blob/c6ccffc/TimeFrameLabeling/evaluate.py)
+- Evaluation code version: [662973a](https://github.com/clamsproject/aapb-evaluations/blob/662973a/TimeFrameLabeling/evaluate.py)
 
 ## Workflow specs
-- Workflow ID: AudioDocument-1/spoken-lid-ambernet/unversioned/cb48ffdb552ca6c16356e5a8a31e7b7b
-- Workflow App Profilings:
+- Workflow ID: `AudioDocument-1/spoken-lid-ambernet/unversioned/cb48ffdb552ca6c16356e5a8a31e7b7b`
+- MMIFs in workflow: 60
+### App: `http://apps.clams.ai/spoken-lid-ambernet/unresolvable`
+#### Configuration
+```json
+{
+  "chunk": 5.0,
+  "top": 3,
+  "pretty": false,
+  "runningTime": false,
+  "hwFetch": false
+}
+```
+#### Profiling
 ```json
 {}
 ```
@@ -61,11 +73,11 @@ cpb-aacip-lid-silver-018,0.14340264530077565,0.9488812598816864,0.87930769789793
 cpb-aacip-lid-silver-019,0.1553684933860162,0.9561955867053604,0.8904426501746548
 cpb-aacip-lid-silver-020,0.07450220121975838,0.966796875,0.9598287491417264
 cpb-aacip-lid-silver-021,0.05032206119162641,0.9520889229589881,1.0
-cpb-aacip-lid-silver-022,0.1492959510662507,0.8953522244432612,0.8898468732711917
+cpb-aacip-lid-silver-022,0.1492959510662507,0.8953522244432613,0.8898468732711917
 cpb-aacip-lid-silver-023,0.1482210349970374,0.858638108413546,0.9003008355976875
 cpb-aacip-lid-silver-038,0.0993074465042832,0.9554510139349228,0.947318686510749
 cpb-aacip-lid-silver-039,0.05037577497358607,0.9525283405806734,0.9994617546797441
-cpb-aacip-lid-silver-040,0.17841688388084528,0.8899323076923078,0.8594847281560031
+cpb-aacip-lid-silver-040,0.17841688388084528,0.8899323076923076,0.8594847281560031
 cpb-aacip-lid-silver-041,0.166220571366144,0.8418768998934761,0.884989348336702
 cpb-aacip-lid-silver-042,0.11870068719776038,0.8856717948717948,0.9157652498515313
 cpb-aacip-lid-silver-043,0.17332682136560718,0.9523528610972455,0.8767041501882119
@@ -75,7 +87,7 @@ cpb-aacip-lid-silver-037,0.11020081455846688,0.9741984312646209,0.91628410669303
 cpb-aacip-lid-silver-001,0.1925284383421272,0.9530208053691275,0.8567360672709395
 cpb-aacip-lid-silver-002,0.05918298824846129,0.9747272727272728,0.9667450102592798
 cpb-aacip-lid-silver-003,0.03153314133153945,0.969430801524384,1.0
-cpb-aacip-lid-silver-004,0.17179584944713755,0.8719060052219322,0.8717795086878369
+cpb-aacip-lid-silver-004,0.17179584944713755,0.8719060052219323,0.8717795086878369
 cpb-aacip-lid-silver-005,0.170567128309484,0.8371241657763652,0.8766546963553629
 cpb-aacip-lid-silver-006,0.1355307921030778,0.9074247997704209,0.8912565963944175
 cpb-aacip-lid-silver-007,0.1482973725557302,0.9846743295019157,0.8672588398176811
@@ -90,7 +102,7 @@ cpb-aacip-lid-silver-048,0.14319324886492818,0.8930635616438356,0.91476975993220
 cpb-aacip-lid-silver-049,0.14199650191099308,0.9686264667126812,0.8903932111161494
 cpb-aacip-lid-silver-050,0.07320441988950262,0.9652777777777778,0.9627647329650094
 cpb-aacip-lid-silver-051,0.045266425245732024,0.9566938876515714,1.0
-cpb-aacip-lid-silver-052,0.16240769362871357,0.8887370327679893,0.8805255023183927
+cpb-aacip-lid-silver-052,0.16240769362871357,0.8887370327679895,0.8805255023183927
 cpb-aacip-lid-silver-053,0.11191813200048178,0.8897417833412434,0.9031366674695893
 Average,0.12049464751237292,0.9245973332960412,0.9191141269191363
 
