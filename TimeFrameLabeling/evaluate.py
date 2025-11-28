@@ -11,7 +11,7 @@ from pyannote.metrics.diarization import (DiarizationErrorRate, DiarizationPurit
                                           DiarizationCoverage)
 from pyannote.metrics.errors.identification import IdentificationErrorAnalysis
 
-from common import ClamsAAPBEvaluationTask
+from common import ClamsAAPBEvaluationTask, EVAL_OTHER_PREFIX
 
 
 class TimeFrameLabelingEvaluator(ClamsAAPBEvaluationTask):
@@ -34,16 +34,16 @@ class TimeFrameLabelingEvaluator(ClamsAAPBEvaluationTask):
     """
 
     def __init__(self, batchname: str, **kwargs):
-        super().__init__(batchname, cf=True, **kwargs)
-        self.task = kwargs.get('task')
+        self.positive_labels = kwargs.get('positive_labels', [])
+        super().__init__(batchname, cf=bool(self.positive_labels), **kwargs)
 
         self._confusion_durations = defaultdict(lambda: defaultdict(float))
         self._per_class_metrics = {}
 
-        # LID specific variables
-        self._lr_gold = None
-        self._lr_preds = {}
-        self._lr_idx = 0
+        # variables for handling labels not in `positive_labels`
+        self._other_gold_label = None
+        self._other_pred_labels = {}
+        self._other_idx = 0
 
     def _read_gold(self, gold_file: Union[str, Path], **kwargs) -> Annotation:
         """
@@ -55,10 +55,11 @@ class TimeFrameLabelingEvaluator(ClamsAAPBEvaluationTask):
         for _, row in pd.read_csv(gold_file).iterrows():
             if row['start'] != 'NO':
                 label = row[col_name]
-                # Currently sets 'ceb' to 'lr' because cebuano cannot be predicted by the whisper model
-                if self.task == 'lid' and label != 'en' and label != 'es':
-                    self._lr_gold = label
-                    label = 'lr0'
+                if self.positive_labels and label not in self.positive_labels:
+                    # Store the first "other" label encountered to rename the report later
+                    if self._other_gold_label is None:
+                        self._other_gold_label = label
+                    label = f'{EVAL_OTHER_PREFIX}0'
                 gold_annotation[Segment(tuh.convert(row['start'], 'iso', 'seconds', 1),
                                         tuh.convert(row['end'], 'iso', 'seconds', 1))] = label
                 # Set up per-class metrics dict
@@ -88,15 +89,14 @@ class TimeFrameLabelingEvaluator(ClamsAAPBEvaluationTask):
                 s = data.get_start(ann)
                 e = data.get_end(ann)
                 label = ann.get_property('label')
-                # If a label is not predicted as en or es, it is relabeled as 'lrX'
-                if self.task == 'lid' and label != 'en' and label != 'es':
-                    if label not in self._lr_preds:
-                        lr_label = f'lr{self._lr_idx}'
-                        self._lr_preds[label] = lr_label
-                        self._lr_idx += 1
-                        label = lr_label
+                if self.positive_labels and label not in self.positive_labels:
+                    if label not in self._other_pred_labels:
+                        other_label = f'{EVAL_OTHER_PREFIX}{self._other_idx}'
+                        self._other_pred_labels[label] = other_label
+                        self._other_idx += 1
+                        label = other_label
                     else:
-                        label = self._lr_preds[label]
+                        label = self._other_pred_labels[label]
                 pred_annotation[Segment(*(tuh.convert(t, in_unit, 'sec', fps) for t in (s, e)))] = label
 
         return pred_annotation, gold
@@ -115,22 +115,23 @@ class TimeFrameLabelingEvaluator(ClamsAAPBEvaluationTask):
         if len(self._per_class_metrics) > 1:
             for label in set(gold.labels()):
                 filtered_gold = gold.subset([label])
-                if self.task == 'lid' and label == 'lr0':
-                    filtered_pred = self._collapse_lr(pred).subset([label])
+                if self.positive_labels and label == f'{EVAL_OTHER_PREFIX}0':
+                    filtered_pred = self._collapse_other(pred).subset([label])
                 else:
                     filtered_pred = pred.subset([label])
                 for name in metric_names:
                     self._per_class_metrics[label][name](filtered_gold, filtered_pred)
 
         # Aggregating results for confusion matrix
-        err = IdentificationErrorAnalysis()
-        for segment, track, label in err.difference(gold, pred).itertracks(yield_label=True):
-            if track == 'confusion0' or track == 'correct0':
-                self._confusion_durations[label[1]][label[2]] += segment.duration
+        if self.positive_labels:
+            err = IdentificationErrorAnalysis()
+            for segment, track, label in err.difference(gold, pred).itertracks(yield_label=True):
+                if track == 'confusion0' or track == 'correct0':
+                    self._confusion_durations[label[1]][label[2]] += segment.duration
 
         # Calculate and return overall metrics
-        if self.task == 'lid':
-            pred = self._collapse_lr(pred)
+        if self.positive_labels:
+            pred = self._collapse_other(pred)
         return (metric(gold, pred) for metric in metrics)
 
     def _compare_all(self, golds, preds) -> Any:
@@ -158,29 +159,31 @@ class TimeFrameLabelingEvaluator(ClamsAAPBEvaluationTask):
         df = pd.read_json(json.dumps(self._confusion_durations), orient='index')
         df = df.fillna(0.0)
         df = df.map(lambda x: tuh.convert(x, 'sec', 'iso', 1))
-        # Rename lr0 with gold lr label
-        if self.task == 'lid':
-            idx_list = list(df.index.array)
-            idx_list[idx_list.index('lr0')] = self._lr_gold
-            df.index = idx_list
+        # Rename other0 with gold "other" label
+        if self.positive_labels and self._other_gold_label:
+            if f'{EVAL_OTHER_PREFIX}0' in df.index:
+                idx_list = list(df.index.array)
+                idx_list[idx_list.index(f'{EVAL_OTHER_PREFIX}0')] = self._other_gold_label
+                df.index = idx_list
 
             # Rename col names with original labels
-            df.rename(columns={val: key for key, val in self._lr_preds.items()}, inplace=True)
+            df.rename(columns={val: key for key, val in self._other_pred_labels.items()}, inplace=True)
         return df.to_markdown(index=True)
 
-    def _collapse_lr(self, annotation: Annotation) -> Annotation:
+    def _collapse_other(self, annotation: Annotation) -> Annotation:
         """
-        Collapses all 'lrX' labels into a single 'lr0' label for evaluation purposes.
-        This is used when evaluating LID since the primary goal is to distinguish low-resource
-        languages from English and Spanish. 
+        Collapses all labels starting with EVAL_OTHER_PREFIX into a single
+        label in f'{EVAL_OTHER_PREFIX}0' for evaluation purposes.
+        This is used when evaluating multi-class tasks where the primary goal is to distinguish
+        a set of positive labels from all other labels.
 
         :param annotation: The Annotation object to collapse
         :return: The collapsed Annotation object
         """
         collapsed_annotation = Annotation()
         for segment, _, label in annotation.itertracks(yield_label=True):
-            if label.startswith('lr'):
-                collapsed_annotation[segment] = 'lr0'
+            if label.startswith(EVAL_OTHER_PREFIX):
+                collapsed_annotation[segment] = f'{EVAL_OTHER_PREFIX}0'
             else:
                 collapsed_annotation[segment] = label
         return collapsed_annotation
@@ -200,21 +203,24 @@ class TimeFrameLabelingEvaluator(ClamsAAPBEvaluationTask):
         if len(self._per_class_metrics) > 1:
             self._results += '\n### Per Class Metrics\n'
             per_class_df = pd.DataFrame(self._per_class_metrics).T
-            if self.task == 'lid':
-                per_class_df = per_class_df.rename(index={'lr0': self._lr_gold})
+            if self.positive_labels and self._other_gold_label:
+                per_class_df = per_class_df.rename(index={f'{EVAL_OTHER_PREFIX}0': self._other_gold_label})
                 per_class_df = per_class_df.map(lambda x: abs(x))
             self._results += per_class_df.to_csv(index=True, sep=',', header=True)
 
-
 if __name__ == "__main__":
     parser = TimeFrameLabelingEvaluator.prep_argparser()
-    parser.add_argument('-t', '--task', choices=['chyron', 'slate', 'lid'], default='chyron')
+    parser.add_argument('--pos-labels', nargs='+',
+                        help='A space-separated list of labels to treat as positive classes. '
+                             'All other labels will be grouped into a generic "other" class '
+                             '(see EVAL_OTHER_PREFIX in common module).')
 
     args = parser.parse_args()
     ref_dir = args.golds
 
     evaluator = TimeFrameLabelingEvaluator(batchname=args.batchname, gold_loc=ref_dir,
-                                           pred_loc=args.preds, task=args.task)
+                                           pred_loc=args.preds,
+                                           positive_labels=args.pos_labels)
     evaluator.calculate_metrics(by_guid=True)
     report = evaluator.write_report()
     args.export.write(report.getvalue())

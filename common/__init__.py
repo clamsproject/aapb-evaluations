@@ -36,6 +36,8 @@ logging.basicConfig(
     format="%(asctime)s %(name)s %(levelname)-8s %(thread)d %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S")
 
+EVAL_OTHER_PREFIX = '_eval_other_'
+
 # this might be too "magic", but as a fallback option for no internet connection
 # read local directory if LOCAL_AAPB_ANNOTATIONS is set
 local_aapb_annotations = None
@@ -69,7 +71,7 @@ class ClamsAAPBEvaluationTask(ABC):
         self._pred_loc = pred_loc
         self._get_gold_files(gold_loc)
         self._get_pred_files(pred_loc)
-        self._wfid, self._wfprofilings = self.validate_pred_mmifs(pred_loc)
+        self._wfsummary = self.validate_pred_mmifs(pred_loc)
         self._results = None
         # variable to store scores for each guid, and overall scores under '*' key
         self._calculations = {}
@@ -83,24 +85,28 @@ class ClamsAAPBEvaluationTask(ABC):
     def validate_pred_mmifs(pred_loc):
         collection_summ = wfh.describe_mmif_collection(pred_loc)
         # valid preds
-        # 1. must be from the same workflow
-        # 2. must have at least one MMIF file with annotations (no empty MMIFs)
-        workflows = collection_summ['mmifCountByWorkflow']
-        if len(workflows) == 0:
-            raise ValueError("No valid MMIF files found in the prediction location.")
-        # TODO (krim @ 2025-11-27): eventually we need better support from the wfh implementation
-        # to handle multiple workflows in the same collection properly
-        # for example, the "mmifCountByWorkflow" should not count empty or error MMIFs
-        else:
-            # but for now...
-            # pick the most frequent workflow from the workflows dict
-            wfid = max(workflows, key=lambda k: workflows[k])
-            logging.info(f"Prediction MMIFs are from workflow {wfid}.")
-            mmif_num = workflows[wfid]
-            logging.info(f"Number of MMIF files from workflow {wfid}: {mmif_num}.")
-            if mmif_num == 0:
-                raise ValueError(f"Prediction MMIFs for workflow {wfid} contain no annotations.")
-        return wfid, collection_summ['appProfilings']
+        # 1. must have at least one successful MMIF file
+        if collection_summ['mmifCountByStatus']['successful'] == 0:
+            raise ValueError("No successful MMIF files found in the prediction location.")
+        # 2. must be from the same workflow (or at least, we assume the user wants
+        #    to evaluate the most frequent one)
+        workflows = collection_summ.get('workflows', [])
+        if not workflows:
+            raise ValueError("No workflow information found in the prediction MMIFs.")
+
+        sorted_workflows = sorted(workflows, key=lambda w: w.get('mmifCount', 0), reverse=True)
+        primary_workflow = sorted_workflows[0]
+        
+        logging.info(f"Primary workflow for evaluation selected: {primary_workflow['workflowId']}")
+        logging.info(f"Number of MMIF files from this workflow: {primary_workflow['mmifCount']}")
+
+        if len(sorted_workflows) > 1:
+            other_wf_ids = [wf['workflowId'] for wf in sorted_workflows[1:]]
+            warnings.warn(f"Multiple workflows found in the prediction set. "
+                          f"The primary workflow was chosen for evaluation. "
+                          f"Other workflows found: {', '.join(other_wf_ids)}", RuntimeWarning)
+        
+        return primary_workflow
 
     @property
     def taskname(self) -> str:
@@ -447,11 +453,18 @@ class ClamsAAPBEvaluationTask(ABC):
                      # f"- System prediction (MMIF) location: {self._pred_loc}\n"  # expose local file paths, is it ok?
                      f"- Evaluation code version: {code_version_info}\n")
         report.write(f"\n## Workflow specs\n")
-        report.write(f"- Workflow ID: {self._wfid}\n")
-        report.write(f"- Workflow App Profilings:\n")
-        report.write("```json\n")
-        json.dump(self._wfprofilings, report, indent=2)
-        report.write("\n```\n")
+        report.write(f"- Workflow ID: `{self._wfsummary.get('workflowId', 'N/A')}`\n")
+        report.write(f"- MMIFs in workflow: {self._wfsummary.get('mmifCount', 'N/A')}\n")
+        for app_info in self._wfsummary.get('apps', []):
+            report.write(f"### App: `{app_info.get('app')}`\n")
+            report.write("#### Configuration\n")
+            report.write("```json\n")
+            json.dump(app_info.get('appConfiguration', {}), report, indent=2)
+            report.write("\n```\n")
+            report.write("#### Profiling\n")
+            report.write("```json\n")
+            json.dump(app_info.get('appProfiling', {}), report, indent=2)
+            report.write("\n```\n")
 
         report.write(f"\n## Raw Results\n")
         if isinstance(self.results, dict):
