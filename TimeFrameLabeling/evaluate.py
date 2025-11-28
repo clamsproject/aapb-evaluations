@@ -1,204 +1,226 @@
-import argparse
-import collections
-import csv
-import math
-import pathlib
-import sys
+import json
+from collections import defaultdict
+from pathlib import Path
+from typing import Any, Union, Optional, Tuple
 
 import pandas as pd
-from mmif import Mmif, DocumentTypes, AnnotationTypes
+from mmif import Mmif, AnnotationTypes
 from mmif.utils import timeunit_helper as tuh
-from mmif.utils import video_document_helper as vdh
-from pyannote.core import Segment, Timeline, Annotation
-from pyannote.metrics.detection import DetectionErrorRate, DetectionPrecisionRecallFMeasure
+from pyannote.core import Segment, Annotation
+from pyannote.metrics.diarization import (DiarizationErrorRate, DiarizationPurity,
+                                          DiarizationCoverage)
+from pyannote.metrics.errors.identification import IdentificationErrorAnalysis
 
-import goldretriever
-
-# Constants
-GOLD_CHYRON_URL = "https://github.com/clamsproject/aapb-annotations/tree/cc0d58e16a06a8f10de5fc0e5333081c107d5937/newshour-chyron/golds"
-GOLD_SLATES_URL = "https://github.com/clamsproject/aapb-annotations/tree/b1d6476b6be6f9ffcb693872931d4d40e84449c8/january-slates/golds"
+from common import ClamsAAPBEvaluationTask, EVAL_OTHER_PREFIX
 
 
-def load_gold_standard(gold_dir):
-    gold_timeframes = collections.defaultdict(Timeline)
-    for gold_fname in pathlib.Path(gold_dir).glob("*.csv"):
-        with open(gold_fname, 'r') as gold_file:
-            aapb_guid = gold_fname.stem
-            r = csv.DictReader(gold_file, delimiter=',')
-            for i, row in enumerate(r):
-                try:
-                    start, end = (tuh.convert(row[time_key], 'iso', 'sec', 0) for time_key in ["start", "end"])
-                    gold_timeframes[aapb_guid].add(Segment(start, end))
-                except ValueError:
-                    sys.stderr.write(f"Invalid time format in {gold_fname}: {row} @ {i}\n")
+class TimeFrameLabelingEvaluator(ClamsAAPBEvaluationTask):
+    """
+    Evaluating tasks that label time frames such as chyron detection, slate detection, 
+    and language identification using diarization error rate, purity, and coverage. 
 
-    return gold_timeframes
+    - Diarization Error Rate (DER) is the sum of three types of errors divided by the total duration:
+        - False Alarm: A segment is predicted with a label when there is none in the gold
+        - Missed Detection: A segment in the gold is not predicted
+        - Confusion: A segment is predicted with an incorrect label
+    - Purity can be understood to be precision-like and measures how much of the predicted
+      segments are correctly labeled.
+    - Coverage can be understood to be recall-like and measures how much of the gold
+      segments are labeled underneath a single label. 
 
+    Note that for DER, lower is better and can be greater than 100%.
+    For all metrics, we use the `pyannote` library.
+    More details can be found at https://pyannote.github.io/pyannote-metrics/reference.html
+    """
 
-def process_mmif_file(mmif_dir, gold_timeframe_dict, frame_types):
-    mmif_files = pathlib.Path(mmif_dir).glob("*.mmif")
-    pred_timeframes = collections.defaultdict(Timeline)
-    for mmif_file in mmif_files:
-        mmif = Mmif(open(mmif_file).read())
-        vds = mmif.get_documents_by_type(DocumentTypes.VideoDocument)
-        if vds:
-            vd = vds[0]
-        else:
-            sys.stderr.write(f"No video document found in {mmif_file}\n")
-            continue
-        aapb_guid = pathlib.Path(vd.location).stem
-        if aapb_guid in gold_timeframe_dict:
-            v = mmif.get_view_contains(AnnotationTypes.TimeFrame)
-            if v is None:
-                sys.stderr.write(f"No TimeFrame found in {mmif_file}\n")
-                continue
-            for tf_ann in v.get_annotations(AnnotationTypes.TimeFrame):
-                if not tf_ann.get_property('frameType') in frame_types:
-                    continue
-                # fps = vdh.get_framerate(vd)
-                fps = 29.97
-                tu = tf_ann.get_property('timeUnit')
-                s = mmif.get_start(tf_ann)
-                e = mmif.get_end(tf_ann)
-                pred_timeframes[aapb_guid].add(Segment(*(tuh.convert(t, tu, 'sec', fps) for t in (s, e))))
-    return pred_timeframes
+    def __init__(self, batchname: str, **kwargs):
+        self.positive_labels = kwargs.get('positive_labels', [])
+        super().__init__(batchname, cf=bool(self.positive_labels), **kwargs)
 
+        self._confusion_durations = defaultdict(lambda: defaultdict(float))
+        self._per_class_metrics = {}
 
-# adapt the code from Kelley Lynch - 'evaluate_chyrons.py'
-# add the situation which the mmif file is not in the gold timeframes
-def calculate_detection_metrics(gold_timeframes_dict, test_timeframes, result_path):
-    metric = DetectionErrorRate()
-    final = DetectionPrecisionRecallFMeasure()
-    TP = 0
-    FP = 0
-    FN = 0
-    data = pd.DataFrame(columns=['GUID', 'FN seconds', 'FP seconds', 'Total true seconds'])
-    for file_ID in test_timeframes:
-        reference = Annotation()
-        for segment in gold_timeframes_dict[file_ID]:
-            reference[segment] = "aapb"
-        hypothesis = Annotation()
-        for segment in test_timeframes[file_ID]:
-            hypothesis[segment] = "aapb"
-        results_dict = metric.compute_components(reference, hypothesis, collar=1.0, detailed=True)
-        average = final.compute_components(reference, hypothesis, collar=1.0, detailed=True)
-        true_positive = average['relevant retrieved']
-        false_negative = average['relevant'] - true_positive
-        false_positive = average['retrieved'] - true_positive
-        TP += true_positive
-        FP += false_positive
-        FN += false_negative
-        data = pd.concat(
-            [
-                data,
-                pd.DataFrame({'GUID': file_ID, 
-                              'FN seconds': results_dict['miss'], 
-                              'FP seconds': results_dict['false alarm'], 
-                              'Total true seconds': results_dict['total']}, 
-                             index=[0])
-            ], ignore_index=True)
-    try:
-        precision = TP / (TP + FP)
-    except ZeroDivisionError:
-        precision = 0
-    try:
-        recall = TP / (TP + FN)
-    except ZeroDivisionError:
-        recall = 0
-    if precision + recall == 0:
-        f1 = 0.0
-    else:
-        f1 = (2 * precision * recall) / (precision + recall)
-    with open(result_path, 'w') as out_f:
-        out_f.write(f'Total Precision = {str(precision)}\t Total Recall = {str(recall)}\t Total F1 = {str(f1)}\n\n\nIndividual file results: \n')
-        out_f.write(data.to_string(index=True))
+        # variables for handling labels not in `positive_labels`
+        self._other_gold_label = None
+        self._other_pred_labels = {}
+        self._other_idx = 0
 
+    def _read_gold(self, gold_file: Union[str, Path], **kwargs) -> Annotation:
+        """
+        :param gold_file: A CSV file containing the gold annotations
+        :return: Annotation object from pyannote library holding gold annotations
+        """
+        gold_annotation = Annotation()
+        col_name = 'scene-label'
+        for _, row in pd.read_csv(gold_file).iterrows():
+            if row['start'] != 'NO':
+                label = row[col_name]
+                if self.positive_labels and label not in self.positive_labels:
+                    # Store the first "other" label encountered to rename the report later
+                    if self._other_gold_label is None:
+                        self._other_gold_label = label
+                    label = f'{EVAL_OTHER_PREFIX}0'
+                gold_annotation[Segment(tuh.convert(row['start'], 'iso', 'seconds', 1),
+                                        tuh.convert(row['end'], 'iso', 'seconds', 1))] = label
+                # Set up per-class metrics dict
+                if label not in self._per_class_metrics:
+                    self._per_class_metrics[label] = {
+                        'Error-Rate': DiarizationErrorRate(),
+                        'Purity': DiarizationPurity(),
+                        'Coverage': DiarizationCoverage()
+                    }
 
-def generate_side_by_side(golddir, testdir, outdir):
-    for guid in golddir:
-        no_detection = False
-        path = outdir / f"{guid}.sbs.csv"
-        gold_time_chunks = []
-        test_time_chunks = []
-        for segment in golddir[guid]:
-            if segment.end == 0:
-                continue
-            gold_start = math.floor(segment.start)
-            gold_end = math.floor(segment.end)
-            gold_time_chunks.extend(range(gold_start, gold_end + 1))
-        if guid in testdir:
-            for segment in testdir[guid]:
-                test_start = math.floor(segment.start)
-                test_end = math.ceil(segment.end)
-                test_time_chunks.extend(range(test_start, test_end))
-        if len(gold_time_chunks) > 0 and len(test_time_chunks) > 0:
-            maximum = max(max(gold_time_chunks), max(test_time_chunks))
-        elif len(gold_time_chunks) > 0:
-            maximum = max(gold_time_chunks)
-        elif len(test_time_chunks) > 0:
-            maximum = max(test_time_chunks)
-        else:
-            no_detection = True
-        with open(path, "w") as out_f:
-            if no_detection:
-                out_f.write("no timeframes annotated in gold or predicted by app")
+        return gold_annotation
+
+    def _read_pred(self, pred_file: Union[str, Path], gold: Optional[Any], **kwargs) -> Tuple[Any, Optional[Any]]:
+        pred_annotation = Annotation()
+        f = open(pred_file, 'r')
+        mmif_str = f.read()
+        f.close()
+        data = Mmif(mmif_str)
+        fps = 29.97
+
+        tf_view = data.get_view_contains(AnnotationTypes.TimeFrame)
+        for ann in reversed(list(tf_view.get_annotations(AnnotationTypes.TimeFrame))):
+            if ann.get_property('fps'):
+                fps = ann.get_property('fps')
             else:
-                i = 0
-                while i < maximum + 1:
-                    interval = "(" + str(i) + " - " + str(i + 1) + ")"
-                    if i in gold_time_chunks:
-                        gold = 1
+                in_unit = ann.get_property('timeUnit')
+                s = data.get_start(ann)
+                e = data.get_end(ann)
+                label = ann.get_property('label')
+                if self.positive_labels and label not in self.positive_labels:
+                    if label not in self._other_pred_labels:
+                        other_label = f'{EVAL_OTHER_PREFIX}{self._other_idx}'
+                        self._other_pred_labels[label] = other_label
+                        self._other_idx += 1
+                        label = other_label
                     else:
-                        gold = 0
-                    if i in test_time_chunks:
-                        test = 1
-                    else:
-                        test = 0
-                    out_f.write(",".join([interval, str(gold), str(test)]))
-                    out_f.write("\n")
-                    i += 1
+                        label = self._other_pred_labels[label]
+                pred_annotation[Segment(*(tuh.convert(t, in_unit, 'sec', fps) for t in (s, e)))] = label
 
+        return pred_annotation, gold
+
+    def _compare_pair(self, guid: str, gold: Any, pred: Any) -> Any:
+        """
+        When evaluating LID, all low-resource languages are collapsed under a single label. 
+        In addition to computing overall DER, purity, and coverage, per-class metrics for each
+        gold label are computed; and results for a confusion matrix are aggregated.
+        """
+
+        metrics = [DiarizationErrorRate(), DiarizationPurity(), DiarizationCoverage()]
+        metric_names = ['Error-Rate', 'Purity', 'Coverage']
+
+        # Calculate per-class metrics if task is not binary like chyron/slate detection
+        if len(self._per_class_metrics) > 1:
+            for label in set(gold.labels()):
+                filtered_gold = gold.subset([label])
+                if self.positive_labels and label == f'{EVAL_OTHER_PREFIX}0':
+                    filtered_pred = self._collapse_other(pred).subset([label])
+                else:
+                    filtered_pred = pred.subset([label])
+                for name in metric_names:
+                    self._per_class_metrics[label][name](filtered_gold, filtered_pred)
+
+        # Aggregating results for confusion matrix
+        if self.positive_labels:
+            err = IdentificationErrorAnalysis()
+            for segment, track, label in err.difference(gold, pred).itertracks(yield_label=True):
+                if track == 'confusion0' or track == 'correct0':
+                    self._confusion_durations[label[1]][label[2]] += segment.duration
+
+        # Calculate and return overall metrics
+        if self.positive_labels:
+            pred = self._collapse_other(pred)
+        return (metric(gold, pred) for metric in metrics)
+
+    def _compare_all(self, golds, preds) -> Any:
+        """
+        Compare all golds and preds is NOT implemented, hence do not
+        call ``calculate_metrics`` with ``by_guid=False``.
+        """
+        raise NotImplementedError("Comparing all golds and preds is not implemented. ")
+
+    def write_side_by_side_view(self):
+        """
+        Side by side view is NOT yet implemented, hence do not
+        instantiate with ``sbs=True``
+        """
+        raise NotImplementedError("Writing side by side view not yet implemented. ")
+
+    def write_confusion_matrix(self) -> str:
+        """
+        Creates a confusion matrix where the rows are the reference labels
+        and the columns are the predicted labels, and the entries are
+        the durations of the confusion in seconds
+
+        :return: The confusion matrix string to be added to self._results
+        """
+        df = pd.read_json(json.dumps(self._confusion_durations), orient='index')
+        df = df.fillna(0.0)
+        df = df.map(lambda x: tuh.convert(x, 'sec', 'iso', 1))
+        # Rename other0 with gold "other" label
+        if self.positive_labels and self._other_gold_label:
+            if f'{EVAL_OTHER_PREFIX}0' in df.index:
+                idx_list = list(df.index.array)
+                idx_list[idx_list.index(f'{EVAL_OTHER_PREFIX}0')] = self._other_gold_label
+                df.index = idx_list
+
+            # Rename col names with original labels
+            df.rename(columns={val: key for key, val in self._other_pred_labels.items()}, inplace=True)
+        return df.to_markdown(index=True)
+
+    def _collapse_other(self, annotation: Annotation) -> Annotation:
+        """
+        Collapses all labels starting with EVAL_OTHER_PREFIX into a single
+        label in f'{EVAL_OTHER_PREFIX}0' for evaluation purposes.
+        This is used when evaluating multi-class tasks where the primary goal is to distinguish
+        a set of positive labels from all other labels.
+
+        :param annotation: The Annotation object to collapse
+        :return: The collapsed Annotation object
+        """
+        collapsed_annotation = Annotation()
+        for segment, _, label in annotation.itertracks(yield_label=True):
+            if label.startswith(EVAL_OTHER_PREFIX):
+                collapsed_annotation[segment] = f'{EVAL_OTHER_PREFIX}0'
+            else:
+                collapsed_annotation[segment] = label
+        return collapsed_annotation
+
+    def _finalize_results(self):
+        cols = 'GUID Error-Rate Purity Coverage'.split()
+
+        df = pd.DataFrame(
+            [[guid] + list(results) for guid, results in self._calculations.items() if results],
+            columns=cols
+        )
+        # then add the average row
+        df.loc[len(df)] = ['Average'] + [df[col].mean() for col in df.columns[1:]]
+        self._results = df.to_csv(index=False, sep=',', header=True)
+
+        # add per class metrics if not binary classification
+        if len(self._per_class_metrics) > 1:
+            self._results += '\n### Per Class Metrics\n'
+            per_class_df = pd.DataFrame(self._per_class_metrics).T
+            if self.positive_labels and self._other_gold_label:
+                per_class_df = per_class_df.rename(index={f'{EVAL_OTHER_PREFIX}0': self._other_gold_label})
+                per_class_df = per_class_df.map(lambda x: abs(x))
+            self._results += per_class_df.to_csv(index=True, sep=',', header=True)
 
 if __name__ == "__main__":
-    # get the absolute path of video-file-dir and hypothesis-file-dir
-    parser = argparse.ArgumentParser(description='Process some directories.')
-    parser.add_argument('-m', '--mmif-dir', type=str, required=True,
-                        help='directory containing machine annotated files (MMIF)')
-    parser.add_argument('-s', '--side-by-side', help='directory to publish side-by-side results', default=None)
-    parser.add_argument('-r', '--result-file', help='file to store evaluation results', default='results.txt')
-    parser.add_argument('-g', '--gold-dir', help='file to store gold standard', default=None)
-    gold_group = parser.add_mutually_exclusive_group(required=True)
-    gold_group.add_argument('--slate', action='store_true', help='slate annotations')
-    gold_group.add_argument('--chyron', action='store_true', help='chyron annotations')
+    parser = TimeFrameLabelingEvaluator.prep_argparser()
+    parser.add_argument('--pos-labels', nargs='+',
+                        help='A space-separated list of labels to treat as positive classes. '
+                             'All other labels will be grouped into a generic "other" class '
+                             '(see EVAL_OTHER_PREFIX in common module).')
+
     args = parser.parse_args()
+    ref_dir = args.golds
 
-    if args.side_by_side:
-        outdir = pathlib.Path(args.side_by_side)
-        if not outdir.exists():
-            outdir.mkdir()
-    else:
-        outdir = pathlib.Path(__file__).parent
-
-    ref_dir = None
-    if args.gold_dir:
-        ref_dir = args.gold_dir
-    else:
-        if args.slate:
-            ref_dir = goldretriever.download_golds(GOLD_SLATES_URL)
-        elif args.chyron:
-            ref_dir = goldretriever.download_golds(GOLD_CHYRON_URL)
-    if ref_dir is None:
-        raise ValueError("No gold standard provided")
-    ref_dir = pathlib.Path(ref_dir)
-
-    gold_timeframes_dict = load_gold_standard(ref_dir)
-
-    # create the 'test_timeframes'
-    test_timeframes = process_mmif_file(args.mmif_dir, gold_timeframes_dict, frame_types=['slate' if args.slate else 'chyron' if args.chyron else ''])
-
-    # final calculation
-    calculate_detection_metrics(gold_timeframes_dict, test_timeframes, args.result_file)
-    generate_side_by_side(gold_timeframes_dict, test_timeframes, outdir)
-
-    print("Done!")
-
+    evaluator = TimeFrameLabelingEvaluator(batchname=args.batchname, gold_loc=ref_dir,
+                                           pred_loc=args.preds,
+                                           positive_labels=args.pos_labels)
+    evaluator.calculate_metrics(by_guid=True)
+    report = evaluator.write_report()
+    args.export.write(report.getvalue())
