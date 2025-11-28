@@ -1,7 +1,7 @@
+import json
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Union, Optional, Tuple
-import json
 
 import pandas as pd
 from mmif import Mmif, AnnotationTypes
@@ -11,9 +11,8 @@ from pyannote.metrics.diarization import (DiarizationErrorRate, DiarizationPurit
                                           DiarizationCoverage)
 from pyannote.metrics.errors.identification import IdentificationErrorAnalysis
 
-import goldretriever
-
 from common import ClamsAAPBEvaluationTask
+
 
 class TimeFrameLabelingEvaluator(ClamsAAPBEvaluationTask):
     """
@@ -33,14 +32,15 @@ class TimeFrameLabelingEvaluator(ClamsAAPBEvaluationTask):
     For all metrics, we use the `pyannote` library.
     More details can be found at https://pyannote.github.io/pyannote-metrics/reference.html
     """
+
     def __init__(self, batchname: str, **kwargs):
-        super().__init__(batchname, **kwargs)
+        super().__init__(batchname, cf=True, **kwargs)
         self.task = kwargs.get('task')
 
         self._confusion_durations = defaultdict(lambda: defaultdict(float))
         self._per_class_metrics = {}
 
-        #LID specific variables
+        # LID specific variables
         self._lr_gold = None
         self._lr_preds = {}
         self._lr_idx = 0
@@ -61,12 +61,12 @@ class TimeFrameLabelingEvaluator(ClamsAAPBEvaluationTask):
                     label = 'lr0'
                 gold_annotation[Segment(tuh.convert(row['start'], 'iso', 'seconds', 1),
                                         tuh.convert(row['end'], 'iso', 'seconds', 1))] = label
-                #Set up per-class metrics dict
+                # Set up per-class metrics dict
                 if label not in self._per_class_metrics:
                     self._per_class_metrics[label] = {
-                        'Error-Rate' : DiarizationErrorRate(),
-                        'Purity' : DiarizationPurity(),
-                        'Coverage' : DiarizationCoverage()
+                        'Error-Rate': DiarizationErrorRate(),
+                        'Purity': DiarizationPurity(),
+                        'Coverage': DiarizationCoverage()
                     }
 
         return gold_annotation
@@ -79,13 +79,6 @@ class TimeFrameLabelingEvaluator(ClamsAAPBEvaluationTask):
         data = Mmif(mmif_str)
         fps = 29.97
 
-        #Between chyron/slate and LID MMIFs, the property name is different
-        #Will remove once unified
-        if self.task == 'lid':
-            property_name = 'label'
-        else:
-            property_name = 'frameType'
-
         tf_view = data.get_view_contains(AnnotationTypes.TimeFrame)
         for ann in reversed(list(tf_view.get_annotations(AnnotationTypes.TimeFrame))):
             if ann.get_property('fps'):
@@ -94,7 +87,7 @@ class TimeFrameLabelingEvaluator(ClamsAAPBEvaluationTask):
                 in_unit = ann.get_property('timeUnit')
                 s = data.get_start(ann)
                 e = data.get_end(ann)
-                label = ann.get_property(property_name)
+                label = ann.get_property('label')
                 # If a label is not predicted as en or es, it is relabeled as 'lrX'
                 if self.task == 'lid' and label != 'en' and label != 'es':
                     if label not in self._lr_preds:
@@ -102,7 +95,7 @@ class TimeFrameLabelingEvaluator(ClamsAAPBEvaluationTask):
                         self._lr_preds[label] = lr_label
                         self._lr_idx += 1
                         label = lr_label
-                    else:                          
+                    else:
                         label = self._lr_preds[label]
                 pred_annotation[Segment(*(tuh.convert(t, in_unit, 'sec', fps) for t in (s, e)))] = label
 
@@ -118,7 +111,7 @@ class TimeFrameLabelingEvaluator(ClamsAAPBEvaluationTask):
         metrics = [DiarizationErrorRate(), DiarizationPurity(), DiarizationCoverage()]
         metric_names = ['Error-Rate', 'Purity', 'Coverage']
 
-        #Calculate per-class metrics if task is not binary like chyron/slate detection
+        # Calculate per-class metrics if task is not binary like chyron/slate detection
         if len(self._per_class_metrics) > 1:
             for label in set(gold.labels()):
                 filtered_gold = gold.subset([label])
@@ -129,16 +122,16 @@ class TimeFrameLabelingEvaluator(ClamsAAPBEvaluationTask):
                 for name in metric_names:
                     self._per_class_metrics[label][name](filtered_gold, filtered_pred)
 
-        #Aggregrating results for confusion matrix
+        # Aggregating results for confusion matrix
         err = IdentificationErrorAnalysis()
         for segment, track, label in err.difference(gold, pred).itertracks(yield_label=True):
             if track == 'confusion0' or track == 'correct0':
                 self._confusion_durations[label[1]][label[2]] += segment.duration
 
-        #Calculate and return overall metrics
+        # Calculate and return overall metrics
         if self.task == 'lid':
             pred = self._collapse_lr(pred)
-        return (metric(gold,pred) for metric in metrics)
+        return (metric(gold, pred) for metric in metrics)
 
     def _compare_all(self, golds, preds) -> Any:
         """
@@ -154,7 +147,7 @@ class TimeFrameLabelingEvaluator(ClamsAAPBEvaluationTask):
         """
         raise NotImplementedError("Writing side by side view not yet implemented. ")
 
-    def _make_confusion_matrix(self) -> str:
+    def write_confusion_matrix(self) -> str:
         """
         Creates a confusion matrix where the rows are the reference labels
         and the columns are the predicted labels, and the entries are
@@ -165,16 +158,15 @@ class TimeFrameLabelingEvaluator(ClamsAAPBEvaluationTask):
         df = pd.read_json(json.dumps(self._confusion_durations), orient='index')
         df = df.fillna(0.0)
         df = df.map(lambda x: tuh.convert(x, 'sec', 'iso', 1))
-        #Rename lr0 with gold lr label
+        # Rename lr0 with gold lr label
         if self.task == 'lid':
             idx_list = list(df.index.array)
             idx_list[idx_list.index('lr0')] = self._lr_gold
             df.index = idx_list
-        
-            #Rename col names with original labels
-            df.rename(columns={val:key for key,val in self._lr_preds.items()}, inplace=True)
-        return df.to_csv(index=True, sep=',', header=True)
-    
+
+            # Rename col names with original labels
+            df.rename(columns={val: key for key, val in self._lr_preds.items()}, inplace=True)
+        return df.to_markdown(index=True)
 
     def _collapse_lr(self, annotation: Annotation) -> Annotation:
         """
@@ -193,7 +185,6 @@ class TimeFrameLabelingEvaluator(ClamsAAPBEvaluationTask):
                 collapsed_annotation[segment] = label
         return collapsed_annotation
 
-
     def _finalize_results(self):
         cols = 'GUID Error-Rate Purity Coverage'.split()
 
@@ -210,19 +201,10 @@ class TimeFrameLabelingEvaluator(ClamsAAPBEvaluationTask):
             self._results += '\n### Per Class Metrics\n'
             per_class_df = pd.DataFrame(self._per_class_metrics).T
             if self.task == 'lid':
-                per_class_df = per_class_df.rename(index={ 'lr0': self._lr_gold })
+                per_class_df = per_class_df.rename(index={'lr0': self._lr_gold})
                 per_class_df = per_class_df.map(lambda x: abs(x))
             self._results += per_class_df.to_csv(index=True, sep=',', header=True)
 
-        # add confusion matrix after Raw Results if evaluating LID
-        # TODO: generalize confusion matrix for other tasks
-        # if self.task == 'lid':
-        #     self._results += '\n### Confusion Matrix\n'
-        #     self._make_confusion_matrix()
-        #     self._results += self._make_confusion_matrix()
-        self._results += '\n### Confusion Matrix\n'
-        self._make_confusion_matrix()
-        self._results += self._make_confusion_matrix()
 
 if __name__ == "__main__":
     parser = TimeFrameLabelingEvaluator.prep_argparser()

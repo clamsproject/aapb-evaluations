@@ -72,6 +72,7 @@ class ClamsAAPBEvaluationTask(ABC):
         self._calculations = {}
         # decide if "side-by-side" view is needed (e.g., for visualization)
         self._do_sbs = kwargs.get('sbs', False)
+        self._do_cf = kwargs.get('cf', False)
         # use a separate variable to store side-by-side results, if needed
         # then use `self._write_side_by_side_view` to "pretty-print" the results
 
@@ -302,7 +303,17 @@ class ClamsAAPBEvaluationTask(ABC):
         only values from `self._results` will be used. 
         """
         raise NotImplementedError
-    
+
+    @abstractmethod
+    def write_confusion_matrix(self):
+        """
+        Write confusion matrix of the results.
+        This method will be called from inside the `write_report` method
+        when `self._do_cf` has any non-false value, which is optional. This
+        could also be called independently to draw the confusion matrix
+        without the full report.
+        """
+        raise NotImplementedError
 
     @abstractmethod
     def write_side_by_side_view(self):
@@ -345,4 +356,7 @@ class ClamsAAPBEvaluationTask(ABC):
             # TODO (krim @ 3/23/25): add side-by-side view of the results
             report.write(self.write_side_by_side_view())
         # TODO (krim @ 3/23/25): and continue templating the report
+        if self._do_cf:
+            report.write(f"\n## Confusion Matrix\n")
+            report.write(self.write_confusion_matrix())
         return report
