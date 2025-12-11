@@ -1,12 +1,17 @@
 """
-Module to provide some evaluation metrics commonly used in AAPB-CLAMS 
+Module to provide some evaluation metrics commonly used in AAPB-CLAMS
 collaboration. Usually providing wrappers around existing libraries, such
 as scipy, jiwer, etc. to provide a common interface for evaluation.
 
 """
 from sklearn.metrics import precision_recall_fscore_support as skprecision_recall_fscore_support
 from sklearn.metrics import classification_report as skclassification_report
-import jiwer 
+import jiwer
+
+# Metric key constants
+MACRO_AVG_PRECISION = 'MAC_AVG_P'
+MACRO_AVG_RECALL = 'MAC_AVG_R'
+MACRO_AVG_F1 = 'MAC_AVG_F' 
 
 
 def casing_text(text, ignore_case):
