@@ -1,3 +1,4 @@
+from collections import defaultdict
 from pathlib import Path
 from typing import Any, Union, Optional, Tuple, List
 
@@ -16,33 +17,27 @@ class TimePointLabelingEvaluator(ClamsAAPBEvaluationTask):
     Evaluates TimePoint classification predictions against gold standard
     annotations.
 
-    ## Input Format
-    - Predictions: MMIF files containing TimePoint annotations
-    - Gold annotations: CSV files with `at` column (timestamp) and any column
-      ending with `-label` (e.g., `scene-label`, `type-label`). If multiple
-      `-label` columns exist, the first one is used.
-
     ## Timestamp Matching
     Uses fuzzy timestamp matching with ±5ms tolerance to align predictions
     with gold timestamps. Each prediction is matched to its nearest gold
     timestamp. Only matched pairs are included in evaluation.
-
-    ## Label Mapping
-    When --label-map is provided, both predicted and gold labels are remapped
-    before evaluation. Unmapped labels are replaced with --default-label
-    (default: "-"). When no label map is provided, raw labels are used
-    directly.
 
     ## Metrics
     Calculates per-label Precision, Recall, and F1 score using
     sklearn.metrics.precision_recall_fscore_support. Metrics are computed
     per-document and macro-averaged across labels. An overall average across
     all documents is also reported.
+
+    ## Confusion Matrix
+    A confusion matrix is generated showing per-label classification counts.
+    Rows represent gold labels (reference), columns represent predicted labels.
+    When --label-map is provided, labels are shown after mapping.
     """
 
     def __init__(self, batchname: str, **kwargs):
         self.label_map = kwargs.get('label_map', None)
         self.default_label = kwargs.get('default_label', '-')
+        self._confusion_counts = defaultdict(lambda: defaultdict(int))
 
         super().__init__(batchname, cf=True, **kwargs)
 
@@ -161,6 +156,10 @@ class TimePointLabelingEvaluator(ClamsAAPBEvaluationTask):
         gold_labels = gold
         pred_labels = pred
 
+        # Collect confusion matrix data
+        for gold_label, pred_label in zip(gold_labels, pred_labels):
+            self._confusion_counts[gold_label][pred_label] += 1
+
         # Get all unique labels (sorted for consistent ordering)
         labels = sorted(set(gold_labels + pred_labels))
 
@@ -231,14 +230,28 @@ class TimePointLabelingEvaluator(ClamsAAPBEvaluationTask):
 
         self._results = df.to_csv(index=False, sep=',', header=True)
 
-    def write_confusion_matrix(self):
+    def write_confusion_matrix(self) -> str:
         """
-        Confusion matrix not yet implemented for TimePointLabeling.
+        Create confusion matrix with count-based entries.
 
-        :raises NotImplementedError: Always raises
+        Rows are reference (gold) labels, columns are predicted labels,
+        and entries are the counts of time points.
+
+        :return: Markdown-formatted confusion matrix
+        :rtype: str
         """
-        raise NotImplementedError(
-            "Confusion matrix not yet implemented for TimePointLabeling")
+        if not self._confusion_counts:
+            return "No confusion matrix data available.\n"
+
+        df = pd.DataFrame.from_dict(
+            self._confusion_counts, orient='index'
+        )
+        df = df.fillna(0).astype(int)
+
+        # Sort for consistent output
+        df = df.sort_index().sort_index(axis=1)
+
+        return df.to_markdown(index=True)
 
     def write_side_by_side_view(self):
         """
