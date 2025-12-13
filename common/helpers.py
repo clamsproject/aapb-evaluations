@@ -1,4 +1,5 @@
 import bisect
+import json
 from typing import List, Tuple, Union, Dict, Optional
 
 numeric = Union[int, float]
@@ -91,33 +92,3 @@ def find_range_index(ranges: List[Tuple[numeric, numeric]], x: numeric, threshol
 
     return -1
 
-
-def parse_label_map(args: List[str]) -> dict:
-    """
-    Parse label map from CLI arguments.
-
-    Supports both space-separated and comma-separated formats:
-    - Identity mappings: ["eng", "spa", "fre"] → eng:eng, spa:spa, fre:fre
-    - Explicit mappings: ["eng:english", "spa:spanish"]
-    - Mixed: ["eng", "spa", "kor:asian", "jpn:asian"]
-    - Comma-separated: ["eng,spa,fre"] or ["eng:english,spa:spanish"]
-
-    :param args: List of label mapping strings from command line
-    :return: Dictionary mapping input labels to output labels
-    :rtype: dict
-    """
-    label_map = {}
-    for arg in args:
-        # Split by comma to handle comma-separated format
-        for mapping in arg.split(','):
-            mapping = mapping.strip()
-            if ':' in mapping:
-                # Explicit mapping: IN:OUT
-                in_label, out_label = mapping.split(':', 1)
-                label_map[in_label.strip()] = out_label.strip()
-            else:
-                # Identity mapping: IN → IN:IN
-                label = mapping.strip()
-                if label:  # ignore empty strings
-                    label_map[label] = label
-    return label_map

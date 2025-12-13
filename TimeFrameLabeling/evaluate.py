@@ -12,7 +12,6 @@ from pyannote.metrics.diarization import (DiarizationErrorRate, DiarizationPurit
 from pyannote.metrics.errors.identification import IdentificationErrorAnalysis
 
 from common import ClamsAAPBEvaluationTask, EVAL_OTHER_PREFIX
-from common.helpers import parse_label_map
 
 
 class TimeFrameLabelingEvaluator(ClamsAAPBEvaluationTask):
@@ -274,22 +273,10 @@ class TimeFrameLabelingEvaluator(ClamsAAPBEvaluationTask):
 
 if __name__ == "__main__":
     parser = TimeFrameLabelingEvaluator.prep_argparser()
-    parser.add_argument('--label-map', nargs='+', default=None,
-                        help='Label mappings. Supports: '
-                             '(1) Identity: "eng spa fre" → keep distinct, '
-                             '(2) Binning: "eng spa kor:asian jpn:asian", '
-                             '(3) Renaming: "english:eng spanish:spa". '
-                             'Comma-separated also works. '
-                             'Unmapped labels use --default-label value.')
-    parser.add_argument('--default-label', type=str, default='-',
-                        help='Label to use for unmapped entries (default: "-")')
-
     args = parser.parse_args()
 
-    # Parse label map
-    label_map = None
-    if args.label_map:
-        label_map = parse_label_map(args.label_map)
+    # Parse label map using common helper
+    label_map = TimeFrameLabelingEvaluator.parse_label_map_args(args)
 
     evaluator = TimeFrameLabelingEvaluator(
         batchname=args.batchname,

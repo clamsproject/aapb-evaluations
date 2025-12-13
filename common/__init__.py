@@ -155,8 +155,9 @@ class ClamsAAPBEvaluationTask(ABC):
     def prep_argparser(cls):
         """
         Prepares the argument parser for the evaluation task. The default
-        arguments are defined in this super class. 
+        arguments are defined in this super class.
         """
+        # basic I/O arguments
         parser = argparse.ArgumentParser(description=cls.__doc__)
         parser.add_argument('-p', '--preds', type=str, required=True, help='directory containing prediction files (MMIF)')
         parser.add_argument('-g', '--golds', type=str, required=True, help='directory containing gold files (non-MMIF)')
@@ -166,7 +167,63 @@ class ClamsAAPBEvaluationTask(ABC):
         parser.add_argument('--source-directory', nargs='?',
                             help='directory that contains original source files without annotations. Only use when information only in the source is needed for calculating evaluation metrics.',
                             default=None)
+
+        # Label mapping arguments (used by classification tasks)
+        label_group = parser.add_mutually_exclusive_group()
+        label_group.add_argument(
+            '--label-map', nargs='+', default=None,
+            help='Label mappings for remapping predicted/gold labels before '
+                 'evaluation. Use when you want to group multiple labels '
+                 'into broader categories (e.g., map "I", "S", "B" to "slate") '
+                 'or rename labels. Supports two formats: (1) Identity mapping '
+                 '- just list labels to keep them distinct: "I S B"; (2) '
+                 'Explicit mapping - use colon notation to remap: "I:slate '
+                 'S:slate B:bars". Space-separated arguments only. Labels not '
+                 'in the mapping are replaced with --default-label value.')
+        label_group.add_argument(
+            '--label-map-json', type=str, default=None,
+            help='Label mapping as JSON string (alternative to --label-map). '
+                 'Use this to copy mappings directly from MMIF metadata. '
+                 'Format: \'{"IN1": "OUT1", "IN2": "OUT2"}\'. Convenient '
+                 'for replicating app configuration in evaluation.')
+        parser.add_argument('--default-label', type=str, default='-',
+                            help='Label to use for unmapped entries (default: "-")')
+
         return parser
+
+    @staticmethod
+    def parse_label_map_args(args) -> Optional[dict]:
+        """
+        If label mapping is provided as a json string, just load it as a dict.
+        Otherwise, parse the colon/comma format using `parse_label_map` method.
+        `--label-map` argument should support both space-separated and
+        comma-separated formats:
+        - Identity mappings: ["eng", "spa", "fre"] → eng:eng, spa:spa, fre:fre
+        - Explicit mappings: ["eng:english", "spa:spanish"]
+        - Mixed: ["eng", "spa", "kor:asian", "jpn:asian"]
+
+
+        :param args: Parsed argparse namespace
+        :return: Label mapping dict or None
+        :rtype: Optional[dict]
+        """
+        if args.label_map_json:
+            return json.loads(args.label_map_json)
+        elif args.label_map:
+            label_map = {}
+            for mapping in args.label_map:
+                mapping = mapping.strip()
+                if ':' in mapping:
+                    # Explicit mapping: IN:OUT
+                    in_label, out_label = mapping.split(':', 1)
+                    label_map[in_label.strip()] = out_label.strip()
+                else:
+                    # Identity mapping: IN → IN:IN
+                    label = mapping.strip()
+                    if label:  # ignore empty strings
+                        label_map[label] = label
+            return label_map
+        return None
 
     def _get_gold_files(self, gold_uri: str) -> Iterable[Union[str, Path]]:
         """

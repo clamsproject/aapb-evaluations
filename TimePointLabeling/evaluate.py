@@ -6,7 +6,7 @@ from mmif import Mmif, AnnotationTypes
 from mmif.utils import timeunit_helper as tuh
 
 from common import ClamsAAPBEvaluationTask
-from common.helpers import parse_label_map, match_nearest_points
+from common.helpers import match_nearest_points
 from common.metrics import (precision_recall_fscore, MACRO_AVG_PRECISION,
                              MACRO_AVG_RECALL, MACRO_AVG_F1)
 
@@ -19,7 +19,8 @@ class TimePointLabelingEvaluator(ClamsAAPBEvaluationTask):
     ## Input Format
     - Predictions: MMIF files containing TimePoint annotations
     - Gold annotations: CSV files with `at` column (timestamp) and any column
-      ending with `-label` (e.g., `scene-label`, `type-label`)
+      ending with `-label` (e.g., `scene-label`, `type-label`). If multiple
+      `-label` columns exist, the first one is used.
 
     ## Timestamp Matching
     Uses fuzzy timestamp matching with ±5ms tolerance to align predictions
@@ -43,7 +44,7 @@ class TimePointLabelingEvaluator(ClamsAAPBEvaluationTask):
         self.label_map = kwargs.get('label_map', None)
         self.default_label = kwargs.get('default_label', '-')
 
-        super().__init__(batchname, **kwargs)
+        super().__init__(batchname, cf=True, **kwargs)
 
     def _read_gold(self, gold_file: Union[str, Path], **kwargs) -> dict:
         """
@@ -251,23 +252,10 @@ class TimePointLabelingEvaluator(ClamsAAPBEvaluationTask):
 
 if __name__ == "__main__":
     parser = TimePointLabelingEvaluator.prep_argparser()
-    parser.add_argument('--label-map', nargs='+', default=None,
-                       help='Label mappings. Supports: '
-                            '(1) Identity: "I S B" → I:I S:S B:B, '
-                            '(2) Explicit: "I:chyron S:slate", '
-                            '(3) Mixed: "I S:slate B:bars". '
-                            'Comma-separated also works. '
-                            'Unmapped labels use --default-label value.')
-    parser.add_argument('--default-label', type=str, default='-',
-                       help='Label to use for unmapped entries '
-                            '(default: "-")')
-
     args = parser.parse_args()
 
-    # Parse label map
-    label_map = None
-    if args.label_map:
-        label_map = parse_label_map(args.label_map)
+    # Parse label map using common helper
+    label_map = TimePointLabelingEvaluator.parse_label_map_args(args)
 
     evaluator = TimePointLabelingEvaluator(
         batchname=args.batchname,
