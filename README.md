@@ -4,6 +4,17 @@ This repository houses the evaluation codebase, results, and reports for the AAP
 ## Structure of This Repository
 Each subdirectory in this repository represents a distinct evaluation task. Each task directory contains its own set of evaluation-specific files, including code, documentation, and configuration.
 
+### Documentation Policy
+All evaluation methodology documentation must be incorporated into the Python module docstrings of the evaluation class. These docstrings automatically appear in the "Evaluation method" section of generated reports via the `write_report()` method.
+
+**No subdirectory README.md files are allowed.** Instead:
+- Document evaluation methodology in the class docstring
+- Document input/output formats in the class docstring
+- Document metrics and algorithms in the class docstring
+- Use `--help` for CLI usage information
+
+This policy ensures documentation stays synchronized with code and appears in generated reports.
+
 ### Inputs to Evaluations
 * "gold" - The gold standard, human-annotated files against which app predictions are evaluated. 
   * Also known as "reference", "ground truth", or "gold standard."

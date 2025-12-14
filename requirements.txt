@@ -1,5 +1,5 @@
 # basic clams libraries
-mmif-python 
+mmif-python>=1.2.1
 clams-utils
 mmif-docloc-baapb
 requests

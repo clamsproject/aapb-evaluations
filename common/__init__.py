@@ -155,8 +155,9 @@ class ClamsAAPBEvaluationTask(ABC):
     def prep_argparser(cls):
         """
         Prepares the argument parser for the evaluation task. The default
-        arguments are defined in this super class. 
+        arguments are defined in this super class.
         """
+        # basic I/O arguments
         parser = argparse.ArgumentParser(description=cls.__doc__)
         parser.add_argument('-p', '--preds', type=str, required=True, help='directory containing prediction files (MMIF)')
         parser.add_argument('-g', '--golds', type=str, required=True, help='directory containing gold files (non-MMIF)')
@@ -166,7 +167,78 @@ class ClamsAAPBEvaluationTask(ABC):
         parser.add_argument('--source-directory', nargs='?',
                             help='directory that contains original source files without annotations. Only use when information only in the source is needed for calculating evaluation metrics.',
                             default=None)
+
+        # Label mapping arguments (used by classification tasks)
+        label_group = parser.add_mutually_exclusive_group()
+        label_group.add_argument(
+            '--label-map', nargs='+', default=None,
+            help='Label mappings for remapping predicted/gold labels before '
+                 'evaluation. Use when you want to group multiple labels '
+                 'into broader categories (e.g., map "I", "S", "B" to "slate") '
+                 'or rename labels. Supports two formats: (1) Identity mapping '
+                 '- just list labels to keep them distinct: "I S B"; (2) '
+                 'Explicit mapping - use colon notation to remap: "I:slate '
+                 'S:slate B:bars". Space-separated arguments only. Target values '
+                 'are automatically identity-mapped (e.g., "b:bc c:bc" adds '
+                 '"bc:bc"), allowing predictions with pre-collapsed labels. '
+                 'Unmapped labels replaced with --default-label value.')
+        label_group.add_argument(
+            '--label-map-json', type=str, default=None,
+            help='Label mapping as JSON string (alternative to --label-map). '
+                 'Use this to copy mappings directly from MMIF metadata. '
+                 'Format: \'{"IN1": "OUT1", "IN2": "OUT2"}\'. Target values '
+                 'are automatically identity-mapped to support pre-collapsed '
+                 'prediction labels. Convenient for replicating app '
+                 'configuration in evaluation.')
+        parser.add_argument('--default-label', type=str, default='-',
+                            help='Label to use for unmapped entries (default: "-")')
+
         return parser
+
+    @staticmethod
+    def parse_label_map_args(args) -> Optional[dict]:
+        """
+        Parse label mapping from args and normalize it.
+
+        Normalization adds identity mappings for all target values (e.g., if
+        you map "b:bc c:bc", then "bc:bc" is automatically added). This allows
+        predictions that already use collapsed labels to be preserved.
+
+        Supports both space-separated and comma-separated formats:
+        - Identity mappings: ["eng", "spa", "fre"] → eng:eng, spa:spa, fre:fre
+        - Explicit mappings: ["eng:english", "spa:spanish"]
+        - Mixed: ["eng", "spa", "kor:asian", "jpn:asian"]
+
+        :param args: Parsed argparse namespace
+        :return: Label mapping dict (normalized) or None
+        :rtype: Optional[dict]
+        """
+        label_map = None
+
+        if args.label_map_json:
+            label_map = json.loads(args.label_map_json)
+        elif args.label_map:
+            label_map = {}
+            for mapping in args.label_map:
+                mapping = mapping.strip()
+                if ':' in mapping:
+                    # Explicit mapping: IN:OUT
+                    in_label, out_label = mapping.split(':', 1)
+                    label_map[in_label.strip()] = out_label.strip()
+                else:
+                    # Identity mapping: IN → IN:IN
+                    label = mapping.strip()
+                    if label:  # ignore empty strings
+                        label_map[label] = label
+
+        # Normalize: add identity mappings for target values
+        if label_map:
+            target_values = set(label_map.values())
+            for target in target_values:
+                if target not in label_map:
+                    label_map[target] = target
+
+        return label_map
 
     def _get_gold_files(self, gold_uri: str) -> Iterable[Union[str, Path]]:
         """
@@ -452,6 +524,16 @@ class ClamsAAPBEvaluationTask(ABC):
                      f"- Groundtruth data location: {self._gold_loc}\n"
                      # f"- System prediction (MMIF) location: {self._pred_loc}\n"  # expose local file paths, is it ok?
                      f"- Evaluation code version: {code_version_info}\n")
+
+        # Add evaluation configuration if label mapping is used
+        if hasattr(self, 'label_map') and self.label_map:
+            report.write(f"\n## Evaluation Configuration\n")
+            report.write("- Label mapping:\n")
+            for key, val in self.label_map.items():
+                report.write(f"  - `{key}` : `{val}`\n")
+            if hasattr(self, 'default_label'):
+                report.write(f"- Default label for unmapped entries: `{self.default_label}`\n\n")
+
         report.write(f"\n## Workflow specs\n")
         report.write(f"- Workflow ID: `{self._wfsummary.get('workflowId', 'N/A')}`\n")
         report.write(f"- MMIFs in workflow: {self._wfsummary.get('mmifCount', 'N/A')}\n")
