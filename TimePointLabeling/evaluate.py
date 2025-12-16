@@ -9,7 +9,7 @@ from mmif.utils import timeunit_helper as tuh
 from common import ClamsAAPBEvaluationTask
 from common.helpers import match_nearest_points
 from common.metrics import (precision_recall_fscore, MACRO_AVG_PRECISION,
-                             MACRO_AVG_RECALL, MACRO_AVG_F1)
+                            MACRO_AVG_RECALL, MACRO_AVG_F1)
 
 
 class TimePointLabelingEvaluator(ClamsAAPBEvaluationTask):
@@ -37,6 +37,7 @@ class TimePointLabelingEvaluator(ClamsAAPBEvaluationTask):
     def __init__(self, batchname: str, **kwargs):
         self.label_map = kwargs.get('label_map', None)
         self.default_label = kwargs.get('default_label', '-')
+        self.target_labels = set()  # to collect labels actually seen in data
         self._confusion_counts = defaultdict(lambda: defaultdict(int))
 
         super().__init__(batchname, cf=True, **kwargs)
@@ -180,6 +181,7 @@ class TimePointLabelingEvaluator(ClamsAAPBEvaluationTask):
             metrics_dict[f"{label}_P"] = float(precision[i])
             metrics_dict[f"{label}_R"] = float(recall[i])
             metrics_dict[f"{label}_F"] = float(f1[i])
+            self.target_labels.add(label)
 
         metrics_dict[MACRO_AVG_PRECISION] = float(macro_p)
         metrics_dict[MACRO_AVG_RECALL] = float(macro_r)
@@ -209,11 +211,12 @@ class TimePointLabelingEvaluator(ClamsAAPBEvaluationTask):
         :return: None (sets self._results)
         """
         # Collect all possible metric columns across all GUIDs
-        all_columns = set()
-        for results in self._calculations.values():
-            if results:
-                all_columns.update(results.keys())
-        all_columns = sorted(all_columns)
+        # keeping order of first appearance
+        all_columns = [MACRO_AVG_PRECISION, MACRO_AVG_RECALL, MACRO_AVG_F1]
+        for label in sorted(self.target_labels):
+            for metric_suffixes in "PRF":
+                col_name = f"{label}_{metric_suffixes}"
+                all_columns.append(col_name)
 
         # Build DataFrame with consistent columns, filling missing with 0
         rows = []
@@ -226,9 +229,9 @@ class TimePointLabelingEvaluator(ClamsAAPBEvaluationTask):
 
         # Add average row (mean of all per-document scores)
         df.loc[len(df)] = ['Average'] + [df[col].mean()
-                                          for col in df.columns[1:]]
+                                         for col in df.columns[1:]]
 
-        self._results = df.to_csv(index=False, sep=',', header=True)
+        self._results = df
 
     def write_confusion_matrix(self) -> str:
         """
