@@ -527,12 +527,23 @@ class ClamsAAPBEvaluationTask(ABC):
                      f"- Evaluation code version: {code_version_info}\n")
 
         # Add evaluation configuration if label mapping is used
+        eval_configs = False
         if hasattr(self, 'label_map') and self.label_map:
+            eval_configs = True
             report.write("- Label mapping:\n")
             for key, val in self.label_map.items():
                 report.write(f"  - `{key}` : `{val}`\n")
             if hasattr(self, 'default_label'):
-                report.write(f"- Default label for unmapped entries: `{self.default_label}`\n\n")
+                report.write(f"- Default label for unmapped entries: `{self.default_label}`\n")
+
+        # Add other evaluation-time configurations
+        if hasattr(self, '_eval_config') and self._eval_config:
+            eval_configs = True
+            for config_name, config_value in self._eval_config.items():
+                report.write(f"- {config_name}: {config_value}\n")
+        # just for formatting
+        if eval_configs:
+            report.write("\n")
 
         report.write(f"\n## Workflow Specs\n")
         report.write(f"- Workflow ID: `{self._wfsummary.get('workflowId', 'N/A')}`\n")
