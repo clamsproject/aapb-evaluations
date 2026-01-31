@@ -250,8 +250,8 @@ class TimePointLabelingEvaluator(ClamsAAPBEvaluationTask):
         all_columns = [MACRO_AVG_PRECISION, MACRO_AVG_RECALL, MACRO_AVG_F1,
                        'Total_GoldCount', 'Total_Matched']
         for label in sorted(self.target_labels):
-            for metric_suffixes in "PRF":
-                col_name = f"{label}_{metric_suffixes}"
+            for metric_suffix in "PRF":
+                col_name = f"{label}_{metric_suffix}"
                 all_columns.append(col_name)
             # Add count columns after metrics for each label
             all_columns.append(f"{label}_TotalGold")
@@ -276,10 +276,9 @@ class TimePointLabelingEvaluator(ClamsAAPBEvaluationTask):
                 # For metric columns (P/R/F), take mean
                 agg_row.append(df[col].mean())
 
-        # Insert aggregation row at the beginning
-        df.loc[-1] = agg_row
-        df.index = df.index + 1
-        df = df.sort_index()
+        # Insert aggregation row at the beginning using concat for robustness
+        overall_df = pd.DataFrame([agg_row], columns=df.columns)
+        df = pd.concat([overall_df, df], ignore_index=True)
 
         self._results = df
 
