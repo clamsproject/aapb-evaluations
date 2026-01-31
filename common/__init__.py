@@ -27,6 +27,7 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Union, Iterable, Any, Tuple, Optional, List
 
+import pandas as pd
 from clams_utils.aapb import guidhandler, goldretriever
 from mmif import Mmif
 from mmif.utils import workflow_helper as wfh
@@ -519,22 +520,32 @@ class ClamsAAPBEvaluationTask(ABC):
         else:
             code_version_info = code_version
 
-        report.write(f"\n## Data specs\n"
+        report.write(f"\n## Data and Evaluation Specs\n"
                      f"- Batch name: {batch_info}\n"
                      f"- Groundtruth data location: {self._gold_loc}\n"
                      # f"- System prediction (MMIF) location: {self._pred_loc}\n"  # expose local file paths, is it ok?
                      f"- Evaluation code version: {code_version_info}\n")
 
         # Add evaluation configuration if label mapping is used
+        eval_configs = False
         if hasattr(self, 'label_map') and self.label_map:
-            report.write(f"\n## Evaluation Configuration\n")
+            eval_configs = True
             report.write("- Label mapping:\n")
             for key, val in self.label_map.items():
                 report.write(f"  - `{key}` : `{val}`\n")
             if hasattr(self, 'default_label'):
-                report.write(f"- Default label for unmapped entries: `{self.default_label}`\n\n")
+                report.write(f"- Default label for unmapped entries: `{self.default_label}`\n")
 
-        report.write(f"\n## Workflow specs\n")
+        # Add other evaluation-time configurations
+        if hasattr(self, '_eval_config') and self._eval_config:
+            eval_configs = True
+            for config_name, config_value in self._eval_config.items():
+                report.write(f"- {config_name}: {config_value}\n")
+        # just for formatting
+        if eval_configs:
+            report.write("\n")
+
+        report.write(f"\n## Workflow Specs\n")
         report.write(f"- Workflow ID: `{self._wfsummary.get('workflowId', 'N/A')}`\n")
         report.write(f"- MMIFs in workflow: {self._wfsummary.get('mmifCount', 'N/A')}\n")
         for app_info in self._wfsummary.get('apps', []):
@@ -557,6 +568,13 @@ class ClamsAAPBEvaluationTask(ABC):
             report.write("```\n")
             report.write(self.results)
             report.write("\n```\n")
+        elif isinstance(self.results, pd.DataFrame):
+            report.write("```\n")
+            report.write(self.results.to_csv(index=False, sep=',', header=True))
+            report.write("\n```\n")
+            report.write(f"\n## Table view\n")
+            report.write(self.results.to_markdown(index=True))
+            report.write("\n")
         else:
             report.write("No results available in a serializable format.\n")
         if self._do_sbs:

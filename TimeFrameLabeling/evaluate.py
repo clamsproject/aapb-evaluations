@@ -218,6 +218,8 @@ class TimeFrameLabelingEvaluator(ClamsAAPBEvaluationTask):
 
             # Rename col names with original labels
             df.rename(columns={val: key for key, val in self._other_pred_labels.items()}, inplace=True)
+    
+        df.index.name = 'gold\\pred'
         return df.to_markdown(index=True)
 
     def _collapse_other(self, annotation: Annotation) -> Annotation:
