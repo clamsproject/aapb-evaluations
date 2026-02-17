@@ -54,10 +54,27 @@ class ClamsAAPBEvaluationTask(ABC):
 
     def __init__(self, batchname: str, gold_loc: Union[str, Path] = None, pred_loc: Union[str, Path] = None, **kwargs):
         """
-        Initialize the evaluation task with a batch name. A "batch" is a 
+        Initialize the evaluation task with a batch name. A "batch" is a
         collection of AAPB GUIDs that are used for evaluation. The batch
-        name can be found in the aapb-annotations repository. (see 
-        `batches` directory in the repository)
+        name can be found in the aapb-annotations repository (see
+        ``batches`` directory in the repository).
+
+        :param batchname: Name of the AAPB GUID batch to evaluate.
+        :param gold_loc: Path to directory containing gold files.
+        :param pred_loc: Path to directory containing prediction MMIFs.
+        :param kwargs: Additional options:
+
+            - ``sbs`` (bool): Include a side-by-side view section in the
+              report by calling ``write_side_by_side_view()``.
+              Default ``False``.
+            - ``cf`` (bool): Include a confusion matrix section in the
+              report by calling ``write_confusion_matrix()``.
+              Default ``False``.
+
+        Subclasses may also set ``self._eval_config`` (a dict) in
+        their ``__init__`` to surface task-specific settings (e.g.,
+        tolerance thresholds) in the report's "Data and Evaluation
+        Specs" section.
         """
         self._taskname = 'NO-TASK' if self.__class__ == ClamsAAPBEvaluationTask else \
             Path(inspect.getfile(self.__class__)).parent.name  # use the name of the directory as the name
@@ -318,14 +335,17 @@ class ClamsAAPBEvaluationTask(ABC):
     @abstractmethod
     def _read_pred(self, pred_file: Union[str, Path], gold: Optional[Any], **kwargs) -> Tuple[Any, Optional[Any]]:
         """
-        Read the pred file and return the processed data. The data should 
-        be ready for comparing and calculating metrics. For some cases, 
-        gold data might be needed to process the pred data, or gold data
-        might need to be updated based on the pred data (e.g., pad dummy 
-        tokens to match data size). If gold data is not needed in this 
-        process, just pass None. 
-        The method must return a tuple of (pred, gold) data. When the 
-        passed gold data is just None, return None for the second element.
+        Read a prediction file and return processed data ready for
+        metric calculation by ``_compare_pair`` or ``_compare_all``.
+
+        Must return a tuple ``(pred, updated_gold)``. The ``gold``
+        parameter is the output of ``_read_gold`` for the same GUID.
+        When your implementation needs to transform or align the gold
+        data based on prediction structure (e.g., aligning label lists
+        by timestamp matching, or padding dummy tokens to match data
+        size), return the updated gold as the second element — it will
+        replace the original gold passed to ``_compare_pair``. Return
+        ``None`` as the second element if gold needs no modification.
         """
         raise NotImplementedError
 
@@ -409,10 +429,21 @@ class ClamsAAPBEvaluationTask(ABC):
     @abstractmethod
     def _finalize_results(self):
         """
-        Use this method to aggregate scores from `self._calculations` 
-        value and put it in the `self._results` attribute. Note that this 
-        method WILL always be called within report generation method, and
-        only values from `self._results` will be used. 
+        Aggregate per-GUID scores from ``self._calculations`` and
+        store the final output in ``self._results``. Called
+        automatically by ``write_report()`` before rendering.
+
+        ``self._calculations`` is a dict keyed by GUID, populated by
+        ``_compare_pair`` during ``calculate_metrics(by_guid=True)``.
+        A value of ``False`` indicates a GUID whose prediction file
+        existed but could not be read.
+
+        The type of ``self._results`` determines how the "Raw Results"
+        section of the report is rendered:
+
+        - ``pd.DataFrame``: Rendered as CSV and a Markdown table.
+        - ``dict``: Rendered as JSON.
+        - ``str``: Rendered as a plain code block.
         """
         raise NotImplementedError
 
@@ -480,8 +511,26 @@ class ClamsAAPBEvaluationTask(ABC):
 
     def write_report(self) -> io.StringIO:
         """
-        Create a report file using a markdown template. First section of 
-        the report should be just a "dumps" of raw calculated results.
+        Create a Markdown report from evaluation results. Calls
+        ``_finalize_results()`` first, then renders a template that
+        includes: evaluation method (class docstring), data specs,
+        workflow specs, raw results, and optional sections.
+
+        The "Raw Results" format depends on the type of
+        ``self._results`` — see ``_finalize_results`` docstring.
+
+        When ``self._do_cf`` is truthy, appends a confusion matrix
+        via ``write_confusion_matrix()``. When ``self._do_sbs`` is
+        truthy, appends a side-by-side view via
+        ``write_side_by_side_view()``.
+
+        If ``self.label_map`` is set, the mapping is included in the
+        "Data and Evaluation Specs" section. If ``self._eval_config``
+        (a dict) is set, each key-value pair is rendered as an
+        additional bullet in the same section.
+
+        :return: Report contents.
+        :rtype: io.StringIO
         """
         self._finalize_results()
         report = io.StringIO()
