@@ -14,106 +14,158 @@ At the heart of every `evaluate.py` is the `ClamsAAPBEvaluationTask` abstract ba
 * Metric Calculation Orchestration: A workflow for comparing gold and prediction data, calculating relevant metrics.
 * Report Generation: Tools to automatically generate formatted Markdown reports summarizing evaluation results.
 
+The `common` package also provides shared utilities:
+
+* `common/metrics.py`: Wrappers around evaluation metrics from `sklearn` and `jiwer`, including `precision_recall_fscore`, `wer`/`cer`, and metric key constants (`MACRO_AVG_PRECISION`, `MACRO_AVG_RECALL`, `MACRO_AVG_F1`).
+* `common/helpers.py`: Utility functions for timestamp and range matching, such as `match_nearest_points` and `find_range_index`.
+
+See the docstrings in each module for detailed signatures and usage.
+
 ## Implementing a New Evaluation Task
 
-To contribute a new evaluation, you will typically create a new Python module (e.g., `YourEvaluationTask/evaluate.py`) that subclasses `ClamsAAPBEvaluationTask` and implements its abstract methods.
+To contribute a new evaluation, create a new Python module (e.g., `YourEvaluationTask/evaluate.py`) that subclasses `ClamsAAPBEvaluationTask` and implements its abstract methods. See `TimePointLabeling/evaluate.py` as a reference implementation.
 
 ### 1. Subclassing `ClamsAAPBEvaluationTask`
 
-Your evaluation script should start by importing `ClamsAAPBEvaluationTask` and defining a new class that inherits from it:
-
 ```python
 from common import ClamsAAPBEvaluationTask
-# ... other imports ...
 
 class YourEvaluationTask(ClamsAAPBEvaluationTask):
     """
-    A brief description of what this evaluation task assesses.
-    This docstring will appear in the generated report.
+    Describe what this evaluation task assesses, the metrics
+    used, and any configurable behavior.
     """
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        # Initialize any task-specific variables here
 ```
 
-### 2. Implementing Abstract Methods
+The class docstring is rendered verbatim in the "Evaluation method" section of the generated Markdown report. Write it as user-facing documentation using Markdown formatting — describe the methodology, metrics, and any configurable behavior.
 
-You **must** implement the following abstract methods:
+### 2. Implementing Core Abstract Methods
 
-*   **`_read_gold(self, gold_file: Union[str, Path], **kwargs) -> Any`**:
-    *   **Purpose**: Reads and processes a single gold standard file into a format suitable for comparison.
-    *   **Return**: The processed gold data.
-*   **`_read_pred(self, pred_file: Union[str, Path], gold: Optional[Any], **kwargs) -> Tuple[Any, Optional[Any]]`**:
-    *   **Purpose**: Reads and processes a single prediction file (an MMIF file from a CLAMS app). It may use the processed `gold` data for context or to modify the `gold` data (e.g., padding).
-    *   **Return**: A tuple `(processed_pred_data, potentially_modified_gold_data)`. If `gold` was not modified or used, return `None` for the second element.
-*   **`_compare_pair(self, guid: str, gold: Any, pred: Any) -> Any`**:
-    *   **Purpose**: Performs the main calculation of evaluation metric(s) for a single pair of gold and prediction instances (identified by their GUID).
-    *   **Return**: The per-GUID evaluation result, which will be stored internally.
-*   **`_compare_all(self, golds: Iterable[Any], preds: Iterable[Any]) -> Any`**:
-    *   **Purpose**: Performs the main calculation of evaluation metric(s) across the entire collection of gold and prediction instances. This is for aggregated, overall metrics.
-    *   **Return**: The aggregated evaluation result.
-*   **`_finalize_results(self)`**:
-    *   **Purpose**: Aggregates the scores calculated by `_compare_pair` and `_compare_all` and stores them in `self._results`. This method is always called just before report generation.
-*   **`write_side_by_side_view(self) -> str`**:
-    *   **Purpose**: Generates a human-readable, side-by-side comparison of gold and prediction data for visualization purposes. This is optional and only included in the report if `sbs=True` is passed during initialization.
-    *   **Return**: A string containing the Markdown-formatted side-by-side view.
+You **must** implement the following methods. See the docstrings in `common/__init__.py` for detailed parameter and return type documentation.
 
-### 3. Command-Line Interface (`prep_argparser`)
+*   `_read_gold(self, gold_file, **kwargs)`: Read a single gold standard file and return processed data suitable for comparison.
+*   `_read_pred(self, pred_file, gold, **kwargs)`: Read a prediction MMIF file and return a `(pred, updated_gold)` tuple. The `gold` parameter is the output of `_read_gold` for the same GUID. When your task requires aligning gold and prediction data (e.g., matching timestamps), return the aligned gold as the second element — it will replace the original gold passed to `_compare_pair`. Return `None` as the second element if gold needs no modification.
+*   `_compare_pair(self, guid, gold, pred)`: Calculate evaluation metrics for a single document.
+*   `_compare_all(self, golds, preds)`: Calculate aggregate metrics across all documents (used when `by_guid=False`). Raise `NotImplementedError` if your task only supports per-GUID evaluation.
 
-The `ClamsAAPBEvaluationTask` provides a default argument parser via `prep_argparser()`. You should call this method and potentially add task-specific arguments:
+### 3. Finalizing Scores
+
+You **must** implement `_finalize_results(self)`, which is called automatically by `write_report()` before rendering. This method aggregates per-GUID results into a final form suitable for the report.
+
+The data flow is:
+
+1. `_compare_pair` stores per-GUID metrics in `self._calculations` (a `dict` keyed by GUID).
+1. `_finalize_results` reads from `self._calculations`, computes aggregates (e.g., an overall average row), and writes the final output to `self._results`.
+1. `write_report()` renders `self._results` in the report. The type of `self._results` determines the rendering format — see the `_finalize_results` and `write_report` docstrings for supported types.
+
+### 4. Additional, Human-Friendly Report Formats
+
+The base class supports two optional report sections — a confusion matrix and a side-by-side view — controlled by constructor kwargs `cf` and `sbs`. Pass these in your `__init__` before calling `super().__init__()`:
+
+```python
+def __init__(self, batchname, **kwargs):
+    # enable confusion matrix in the report
+    super().__init__(batchname, cf=True, **kwargs)
+```
+
+* `cf=True`: Appends a "Confusion Matrix" section by calling `write_confusion_matrix()`.
+* `sbs=True`: Appends a "Side-by-side view" section by calling `write_side_by_side_view()`.
+
+Both methods are **abstract**. Every subclass must implement them, even when the evaluation doesn't use that format — in which case, raise `NotImplementedError`. Each method should return a Markdown-formatted string.
+
+### 5. Complex Label Remapping at Evaluation Time
+
+For classification tasks where gold and prediction label vocabularies differ, the base class provides label mapping infrastructure through CLI arguments, a parsing helper, and automatic report rendering.
+
+The `prep_argparser()` method adds three label-related CLI arguments:
+
+* `--label-map`: Space-separated mappings. Supports identity format (`A B C`) and explicit mapping (`A:x B:x C:y`). Target values are automatically identity-mapped to handle predictions using pre-collapsed labels.
+* `--label-map-json`: JSON string alternative, mutually exclusive with `--label-map`.
+* `--default-label`: Fallback label for unmapped entries (default: `"-"`).
+
+Use `parse_label_map_args(args)` to convert parsed CLI args into a normalized `dict`, then pass it to your evaluator's constructor:
+
+```python
+args = parser.parse_args()
+label_map = YourEvaluationTask.parse_label_map_args(args)
+evaluator = YourEvaluationTask(
+    batchname=args.batchname,
+    label_map=label_map,
+    default_label=args.default_label,
+    ...
+)
+```
+
+When a label map is present, `write_report()` automatically includes the full mapping table in the report.
+
+To surface other task-specific settings in the report (e.g., matching tolerance, thresholds), populate a `self._eval_config` dict in your `__init__`:
+
+```python
+self._eval_config = {'Timestamp matching tolerance': '5ms'}
+```
+
+Each key-value pair is rendered as a bullet in the "Data and Evaluation Specs" section.
+
+### 6. Command-Line Interface (`prep_argparser`)
+
+The `ClamsAAPBEvaluationTask` provides a default argument parser via `prep_argparser()`. Call this method and add task-specific arguments:
 
 ```python
 if __name__ == '__main__':
     parser = YourEvaluationTask.prep_argparser()
-    # Add any task-specific arguments here, e.g.:
-    # parser.add_argument('--my-custom-param', type=str, help='A custom parameter for this task.')
+    parser.add_argument('--my-param', type=int, help='...')
     args = parser.parse_args()
 
-    # Initialize and run the evaluation
+    label_map = YourEvaluationTask.parse_label_map_args(args)
+
     eval_task = YourEvaluationTask(
         batchname=args.batchname,
         gold_loc=args.golds,
         pred_loc=args.preds,
-        # Pass custom arguments to __init__ if needed
-        # my_custom_param=args.my_custom_param
+        label_map=label_map,
+        default_label=args.default_label,
     )
-    eval_task.calculate_metrics(by_guid=True) # or False, depending on your evaluation
-    # ... further processing ...
+    eval_task.calculate_metrics(by_guid=True)
     report = eval_task.write_report()
     args.export.write(report.getvalue())
 ```
 
-Common command-line arguments (handled by `ClamsAAPBEvaluationTask`):
+Common arguments provided by the base class:
+
 *   `-p`, `--preds`: Directory containing prediction MMIF files.
 *   `-g`, `--golds`: Directory containing gold standard files.
 *   `-e`, `--export`: Filename to export the Markdown report (defaults to stdout).
 *   `-b`, `--batchname`: Batch name from the `aapb-annotations` repository.
-*   `--source-directory`: Optional directory for original source files (e.g., large video files) if needed for evaluation.
+*   `--source-directory`: Optional directory for original source files.
+*   `--label-map`, `--label-map-json`, `--default-label`: Label remapping options (see Section 5).
 
-### 4. Input Data Format
+### 7. Input Data Format
 
-*   **Gold Files**: Typically `.tsv`, `.csv`, or `.txt` files. The `_read_gold` method in your subclass will interpret these.
-*   **Prediction Files**: Always `.mmif` files (or rarely `.json`) generated by CLAMS workflows. The `_read_pred` method will parse these.
+*   Gold files: Typically `.tsv`, `.csv`, or `.txt` files. The `_read_gold` method in your subclass will interpret these.
+*   Prediction files: Always `.mmif` files (or rarely `.json`) generated by CLAMS workflows. The `_read_pred` method will parse these.
 
-### 5. Report Generation
+### 8. Report Generation
 
 The `write_report()` method automatically generates a Markdown report including:
+
 *   Evaluation task name and timestamp.
-*   Docstring of your `YourEvaluationTask` class as the evaluation method description.
-*   Data specifications (batch name, gold location, evaluation code version).
-*   Workflow specifications (CLAMS workflow ID and app profilings).
-*   Raw results (dumped as JSON or a custom string from `self._results`).
-*   (Optional) Side-by-side view from `write_side_by_side_view()`.
+*   Class docstring as the evaluation method description.
+*   Data and evaluation specs (batch name, gold location, code version, label mapping, `_eval_config` entries).
+*   Workflow specs (CLAMS workflow ID and app profilings).
+*   Raw results (rendering depends on `self._results` type — see Section 3).
+*   Optional confusion matrix and/or side-by-side view (see Section 4).
 
-### 6. Code Versioning
+### 9. Code Versioning
 
-The framework automatically attempts to include the git commit hash of your evaluation script in the report, indicating whether the code is "dirty" (has uncommitted changes) or a specific commit. Ensure your evaluation scripts are part of a git repository for accurate version tracking.
+The framework automatically includes the git commit hash of your evaluation script in the report, indicating whether the code is "dirty" (has uncommitted changes) or a specific commit. Ensure your evaluation scripts are part of a git repository for accurate version tracking.
 
 ## General Guidelines
 
-*   **Modularity**: Keep your `_read_gold`, `_read_pred`, `_compare_pair`, and `_compare_all` methods focused on their specific tasks.
-*   **Error Handling**: Implement robust error handling within your `_read_pred` method, especially for parsing potentially malformed MMIF files. Warnings for skipped GUIDs are automatically handled by the framework.
-*   **Documentation**: Clearly document your `YourEvaluationTask` class and its methods, especially `_read_gold` and `_read_pred`, to explain the expected data formats and processing logic.
-*   **Testing**: While not explicitly covered here, ensure you write unit tests for your custom `_read_gold`, `_read_pred`, and `_compare` methods.
+*   Modularity: Keep your `_read_gold`, `_read_pred`, `_compare_pair`, and `_compare_all` methods focused on their specific tasks.
+*   Error handling: Implement robust error handling within your `_read_pred` method, especially for parsing potentially malformed MMIF files. Warnings for skipped GUIDs are automatically handled by the framework.
+*   Documentation: Write your class docstring as user-facing methodology documentation. Document `_read_gold` and `_read_pred` to explain expected data formats.
+*   Testing: Ensure you write unit tests for your custom `_read_gold`, `_read_pred`, and `_compare` methods.
 
 By following these guidelines, you can effectively contribute new and robust evaluation tasks to the AAPB Evaluations project.
