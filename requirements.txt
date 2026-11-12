@@ -1,5 +1,5 @@
 # basic clams libraries
-mmif-python>=1.2.1
+mmif-python==1.4.*
 clams-utils
 mmif-docloc-baapb
 requests
@@ -7,6 +7,7 @@ requests
 # data processing
 numpy
 pandas
+tabulate # could do pandas[output-formatting], but that also includes jinja
 scikit-learn
 opencv-python
 

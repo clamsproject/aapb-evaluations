@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aapb-evaluations-mv"
+version = "0.0.1"
+description = "Run evaluations on CLAMS output."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "mmif-python==1.4.*",
+    # to be updated asap for goldretriever
+    "clams-utils==260131",
+    "mmif-docloc-baapb",
+    "requests",
+    "numpy",
+    # we could use pandas[output-formatting], which includes tabulate, but then we
+    # would also include jinja in the dependencies
+    "pandas",
+    "tabulate",
+    "scikit-learn",
+    "opencv-python",
+    "jiwer",
+    "pyannote.metrics",
+    "seqeval"
+]
+
+#[project.optional-dependencies]
+
+#[project.scripts]
+
+[tool.setuptools.packages.find]
+where = [""]
+include = [
+    "common", "TimePointLabeling", "TimeFrameLabeling",
+    "AutomaticSpeechRecognition","ForcedAlignment", "KeyedInformationExtraction",
+    "NamedEntityGrounding", "NamedEntityRecognition", "TextRecognition" ]
+namespaces = false
+
+[project.urls]
+homepage = "https://clams.ai"
+source = "https://github.com/clamsproject/aapb-evaluations"

@@ -1,3 +1,4 @@
+import json
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Union, Optional, Tuple, List
@@ -8,8 +9,16 @@ from mmif.utils import timeunit_helper as tuh
 
 from common import ClamsAAPBEvaluationTask
 from common.helpers import match_nearest_points
-from common.metrics import (precision_recall_fscore, MACRO_AVG_PRECISION,
-                            MACRO_AVG_RECALL, MACRO_AVG_F1)
+from common.metrics import \
+    (precision_recall_fscore, MACRO_AVG_PRECISION, MACRO_AVG_RECALL, MACRO_AVG_F1)
+
+
+DEBUG = False
+
+
+def debug(message: str):
+    if DEBUG:
+        print(message)
 
 
 class TimePointLabelingEvaluator(ClamsAAPBEvaluationTask):
@@ -44,21 +53,18 @@ class TimePointLabelingEvaluator(ClamsAAPBEvaluationTask):
         # Temporary storage for per-document counts (used during evaluation)
         self._current_doc_gold_counts = {}
         self._current_doc_matched_counts = {}
-
         super().__init__(batchname, cf=True, **kwargs)
-
         # Store evaluation-time configurations for report generation
         self._eval_config = {
-            'Timestamp matching tolerance': f'{self.tolerance}ms'
-        }
+            'Timestamp matching tolerance': f'{self.tolerance}ms' }
+
 
     def _read_gold(self, gold_file: Union[str, Path], **kwargs) -> dict:
         """
         Read gold CSV file and return dict mapping timestamps to labels.
 
-        :param gold_file: Path to CSV file with 'at' column and a label
-                          column matching pattern '*-label' (e.g., 'scene-label',
-                          'type-label')
+        :param gold_file: Path to CSV file with 'at' column and a column matching
+                          '*-label' (e.g., 'scene-label', 'type-label')
         :return: Dict mapping timestamp (milliseconds) to label string
         :rtype: dict
         """
@@ -68,9 +74,8 @@ class TimePointLabelingEvaluator(ClamsAAPBEvaluationTask):
         label_cols = [col for col in df.columns if col.endswith('-label')]
         if not label_cols:
             raise ValueError(
-                f"No label column found in {gold_file}. "
-                f"Expected column ending with '-label', "
-                f"got: {list(df.columns)}")
+                f"No label column found in {gold_file}. Expected column ending "
+                f"with '-label', got: {list(df.columns)}")
         if len(label_cols) > 1:
             self.logger.warning(
                 f"Multiple label columns found: {label_cols}. "
@@ -90,9 +95,14 @@ class TimePointLabelingEvaluator(ClamsAAPBEvaluationTask):
             mapped_label = self.label_map.get(label, self.default_label) if self.label_map else label
             self._current_doc_gold_counts[mapped_label] += 1
 
+        # these lines are just for debugging, to be removed at some point
+        pdict = {k:v for k,v in gold_dict.items() if k < 100000}
+        debug(f'>>> GOLD\n{pdict}')
+
         return gold_dict
 
-    def _read_pred(self, pred_file: Union[str, Path], gold: Optional[Any],
+
+    def _read_pred(self, pred_file: Union[str, Path], gold_dict: Optional[Any],
                    **kwargs) -> Tuple[List[str], List[str]]:
         """
         Read prediction MMIF and return aligned predicted labels.
@@ -101,82 +111,52 @@ class TimePointLabelingEvaluator(ClamsAAPBEvaluationTask):
         (set via --tolerance argument) to align predictions with gold timestamps.
 
         :param pred_file: Path to MMIF file containing TimePoint annotations
-        :param gold: Dict mapping timestamps to gold labels (input)
+        :param gold_dict: Dict mapping timestamps to gold labels (input)
         :return: Tuple of (pred_list, gold_list) where both are lists of
                  labels aligned by timestamp matching. Only matched timestamps
                  are included; both lists have the same length.
         :rtype: Tuple[List[str], List[str]]
         """
-        mmif_f = open(pred_file, "r")
-        pred_mmif = Mmif(mmif_f.read())
-        mmif_f.close()
 
-        # Get TimePoint annotations
-        tp_views = list(pred_mmif.get_all_views_contain(AnnotationTypes.TimePoint))
+        tp_views = read_views(pred_file, AnnotationTypes.TimePoint)
         if not tp_views:
             self.logger.warning(f"No TimePoint annotations found in {pred_file}")
             return [], []
 
-        # First pass: collect all pred annotations with their timestamps
-        pred = dict([
-            (
-                tuh.convert(
-                    annotation.get('timePoint'),
-                    annotation.get('timeUnit', 'milliseconds'),
-                    'milliseconds', 1),
-                annotation.get('label')
-            )
-            for view in tp_views
-            for annotation in view.get_annotations(
-                AnnotationTypes.TimePoint)
-        ])
+        pred_dict = read_timepoint_predictions(tp_views)
+        debug(f'>>> PRED\n{pred_dict}')
 
-        # Match predicted timestamps to nearest gold timestamps
-        matches = match_nearest_points(list(pred.keys()), list(gold.keys()), tolerance=self.tolerance)
-
-        # Build aligned predictions and gold labels
-        gold_list = []
-        pred_list = []
-        for pred_ts, gold_ts in matches.items():
-            if gold_ts is not None:
-                pred_label = pred[pred_ts] if not self.label_map \
-                    else self.label_map.get(pred[pred_ts], self.default_label)
-                gold_label = gold[gold_ts] if not self.label_map \
-                    else self.label_map.get(gold[gold_ts], self.default_label)
-                gold_list.append(gold_label)
-                pred_list.append(pred_label)
-        if len(gold_list) != len(pred_list):
-            raise ValueError("Number of gold and pred labels do not match after timestamp alignment.")
+        # align the gold and the pred and get the labels for the overlap
+        gold_list, pred_list = self._align_gold_and_pred_dicts(gold_dict, pred_dict)
 
         # Count matched points per label for this document
         self._current_doc_matched_counts = defaultdict(int)
         for gold_label in gold_list:
             self._current_doc_matched_counts[gold_label] += 1
 
+        debug(f'*** GOLD\n{gold_list}')
+        debug(f'*** PRED\n{pred_list}')
+
         return pred_list, gold_list
 
-    def _compare_pair(self, guid: str, gold: Any, pred: Any) -> dict:
+
+    def _compare_pair(self, guid: str, gold_labels: Any, pred_labels: Any) -> dict:
         """
-        Calculate evaluation metrics for a single document using sklearn.
+        Calculate evaluation metrics for a single document using sklearn metrics.
 
         :param guid: Document identifier
-        :param gold: List of gold labels (already label-mapped and aligned
-                     to pred)
-        :param pred: List of predicted labels (already label-mapped and
-                     aligned to gold)
-        :return: Dict with per-label metrics ("{label}_P", "{label}_R",
+        :param gold_labels: List of gold labels (already label-mapped and aligned
+                            to pred)
+        :param pred_labels: List of predicted labels (already label-mapped and
+                            aligned to gold)
+        :return: Dictionary with per-label metrics ("{label}_P", "{label}_R",
                  "{label}_F" for each label in data) plus macro-averaged
                  metrics (MACRO_AVG_PRECISION, MACRO_AVG_RECALL, MACRO_AVG_F1
                  constants from common.metrics)
         :rtype: dict
         """
-        if not pred or not gold:
-            return {MACRO_AVG_PRECISION: 0, MACRO_AVG_RECALL: 0,
-                    MACRO_AVG_F1: 0}
-
-        # Both gold and pred are already aligned lists
-        gold_labels = gold
-        pred_labels = pred
+        if not pred_labels or not gold_labels:
+            return {MACRO_AVG_PRECISION: 0, MACRO_AVG_RECALL: 0, MACRO_AVG_F1: 0}
 
         # Collect confusion matrix data
         for gold_label, pred_label in zip(gold_labels, pred_labels):
@@ -184,17 +164,20 @@ class TimePointLabelingEvaluator(ClamsAAPBEvaluationTask):
 
         # Get all unique labels (sorted for consistent ordering)
         labels = sorted(set(gold_labels + pred_labels))
-
+        
         # Calculate per-label metrics
         precision, recall, f1 = precision_recall_fscore(
-            gold_labels, pred_labels, labels=labels, average=None,
-            zero_division=0
-        )
+            gold_labels, pred_labels, labels=labels, average=None, zero_division=0)
+        # print(f'>>> PER LABEL')
+        # print(f'--- P {precision}')
+        # print(f'--- R {recall}')
+        # print(f'--- F {f1}')
 
         # Calculate macro averages
         macro_p, macro_r, macro_f1 = precision_recall_fscore(
-            gold_labels, pred_labels, average='macro', zero_division=0
-        )
+            gold_labels, pred_labels, average='macro', zero_division=0)
+        labels_str = ' labels = [' + f'{", ".join(labels)}' + ']'
+        #print(f'>>> {guid:30s}  {macro_p:4.3f}  {macro_r:4.3f}  {macro_f1:4.3f}  {labels_str}')
 
         # Build metrics dictionary
         metrics_dict = {}
@@ -233,8 +216,7 @@ class TimePointLabelingEvaluator(ClamsAAPBEvaluationTask):
         :raises NotImplementedError: Always raises
         """
         raise NotImplementedError(
-            "Comparing all golds and preds is not implemented. "
-            "Use by_guid=True mode.")
+            "Comparing all golds and preds is not implemented. Use by_guid=True mode.")
 
     def _finalize_results(self):
         """
@@ -263,8 +245,8 @@ class TimePointLabelingEvaluator(ClamsAAPBEvaluationTask):
             if results:
                 row = [guid] + [results.get(col, 0) for col in all_columns]
                 rows.append(row)
-
         df = pd.DataFrame(rows, columns=['GUID'] + all_columns)
+        #print('>>>', all_columns)
 
         # Build aggregation row (mean for metrics, sum for counts)
         agg_row = ['Overall']
@@ -282,6 +264,7 @@ class TimePointLabelingEvaluator(ClamsAAPBEvaluationTask):
 
         self._results = df
 
+
     def write_confusion_matrix(self) -> str:
         """
         Create confusion matrix with count-based entries.
@@ -294,15 +277,10 @@ class TimePointLabelingEvaluator(ClamsAAPBEvaluationTask):
         """
         if not self._confusion_counts:
             return "No confusion matrix data available.\n"
-
-        df = pd.DataFrame.from_dict(
-            self._confusion_counts, orient='index'
-        )
+        df = pd.DataFrame.from_dict(self._confusion_counts, orient='index')
         df = df.fillna(0).astype(int)
-
         # Sort for consistent output
         df = df.sort_index().sort_index(axis=1)
-
         df.index.name = 'gold\\pred'
         return df.to_markdown(index=True)
 
@@ -315,15 +293,60 @@ class TimePointLabelingEvaluator(ClamsAAPBEvaluationTask):
         raise NotImplementedError(
             "Side-by-side view not implemented for TimePointLabeling")
 
+    def _align_gold_and_pred_dicts(self, gold_dict: dict, pred_dict: dict):
+        # Match predicted timestamps to nearest gold timestamps
+        matches = match_nearest_points(
+            list(pred_dict.keys()), list(gold_dict.keys()), tolerance=self.tolerance)
+        debug(f'>>> MATCHES\n{matches}')
+        # Build aligned predictions and gold labels
+        gold_list = []
+        pred_list = []
+        for pred_ts, gold_ts in matches.items():
+            if gold_ts is not None:
+                pred_label = pred_dict[pred_ts] if not self.label_map \
+                    else self.label_map.get(pred_dict[pred_ts], self.default_label)
+                gold_label = gold_dict[gold_ts] if not self.label_map \
+                    else self.label_map.get(gold_dict[gold_ts], self.default_label)
+                gold_list.append(gold_label)
+                pred_list.append(pred_label)
+        if len(gold_list) != len(pred_list):
+            raise ValueError("Number of gold and pred labels do not match after timestamp alignment.")
+        return gold_list, pred_list
+
+
+def read_views(mmif_file: Path, at_type: AnnotationTypes.Annotation) -> list:
+    """Read all views from a MMIF file that match the annotation type."""
+    with open(mmif_file, "r") as fh:
+        mmif = Mmif(fh.read())
+        views = list(mmif.get_all_views_contain(at_type))
+        return views
+
+
+def read_timepoint_predictions(tp_views: list) -> dict:
+    """Read annotations in a view and create a dictionary of timepoints (in
+    millisecnds) mapped to labels."""
+    return dict([
+        (
+            tuh.convert(
+                annotation.get('timePoint'),
+                annotation.get('timeUnit', 'milliseconds'),
+                'milliseconds', 1),
+            annotation.get('label')
+        )
+        for view in tp_views
+        for annotation in view.get_annotations(AnnotationTypes.TimePoint)
+    ])
+
+
 
 if __name__ == "__main__":
+
     parser = TimePointLabelingEvaluator.prep_argparser()
     parser.add_argument(
         '--tolerance',
         type=int,
         default=5,
-        help='Timestamp matching tolerance in milliseconds (default: 5ms)'
-    )
+        help='Timestamp matching tolerance in milliseconds (default: 5ms)')
     args = parser.parse_args()
 
     # Parse label map using common helper
@@ -335,9 +358,10 @@ if __name__ == "__main__":
         pred_loc=args.preds,
         label_map=label_map,
         default_label=args.default_label,
-        tolerance=args.tolerance
-    )
+        tolerance=args.tolerance)
 
     evaluator.calculate_metrics(by_guid=True)
     report = evaluator.write_report()
     args.export.write(report.getvalue())
+    print(type(evaluator._results))
+    print(evaluator._results)
